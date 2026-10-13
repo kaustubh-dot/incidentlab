@@ -1,0 +1,293 @@
+"""IncidentLab command line interface."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import platform
+import shutil
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from incidentlab.config import Settings
+from incidentlab.model import count_request_tokens
+
+
+def run_command_probe(cmd: list[str]) -> dict[str, Any]:
+    """Execute a system probe command safely and return status and output."""
+    binary_path = shutil.which(cmd[0])
+    if binary_path is None:
+        return {
+            "available": False,
+            "exit_code": -1,
+            "error": f"Command not found: {cmd[0]}",
+        }
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return {
+            "available": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout.strip(),
+            "stderr": proc.stderr.strip(),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "exit_code": -1,
+            "error": str(exc),
+        }
+
+
+def probe_memory() -> dict[str, Any]:
+    """Read system memory information."""
+    mem_info: dict[str, Any] = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    val = parts[1].strip()
+                    if key in ("MemTotal", "MemAvailable", "MemFree", "SwapTotal", "SwapFree"):
+                        mem_info[key] = val
+    except Exception as exc:
+        mem_info["error"] = str(exc)
+    return mem_info
+
+
+async def probe_ollama(settings: Settings) -> dict[str, Any]:
+    """Probe Ollama server and candidate model capabilities."""
+    import httpx
+
+    cli_path = shutil.which("ollama") or str(Path.home() / ".local" / "bin" / "ollama")
+    cli_exists = Path(cli_path).exists() if cli_path else False
+
+    ollama_info: dict[str, Any] = {
+        "configured_base_url": settings.il_ollama_base_url,
+        "cli_binary": cli_path if cli_exists else None,
+        "cli_available": cli_exists,
+        "reachable": False,
+        "active_url": None,
+        "version": None,
+        "candidate_model": settings.il_model,
+        "model_found": False,
+        "model_details": None,
+        "native_tools_supported": False,
+        "schema_mode_supported": False,
+        "thinking_mode_disabled_supported": False,
+        "error": None,
+    }
+
+    # Try configured URL, then localhost if configured URL hostname fails
+    candidate_urls = [settings.il_ollama_base_url]
+    if (
+        "127.0.0.1:11434" not in settings.il_ollama_base_url
+        and "localhost:11434" not in settings.il_ollama_base_url
+    ):
+        candidate_urls.append("http://127.0.0.1:11434")
+
+    for url in candidate_urls:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                res = await client.get(f"{url}/api/version")
+                if res.status_code == 200:
+                    ollama_info["reachable"] = True
+                    ollama_info["active_url"] = url
+                    ollama_info["version"] = res.json().get("version")
+
+                    # Check tags
+                    tags_res = await client.get(f"{url}/api/tags")
+                    if tags_res.status_code == 200:
+                        models = tags_res.json().get("models", [])
+                        for m in models:
+                            match_name = m.get("name") == settings.il_model
+                            match_model = m.get("model") == settings.il_model
+                            if match_name or match_model:
+                                ollama_info["model_found"] = True
+                                ollama_info["model_details"] = m
+                                break
+                    break
+        except Exception as exc:
+            if ollama_info["error"] is None:
+                ollama_info["error"] = str(exc)
+
+    if ollama_info["reachable"] and ollama_info["model_found"]:
+        from incidentlab.model import call_model
+
+        active_settings = Settings.from_mapping({
+            "IL_DATABASE_URL": settings.il_database_url,
+            "IL_SANDBOX_DATABASE_URL": settings.il_sandbox_database_url,
+            "IL_OWNER_TOKEN": settings.il_owner_token,
+            "IL_SANDBOX_READ_TOKEN": settings.il_sandbox_read_token,
+            "IL_SANDBOX_WRITE_TOKEN": settings.il_sandbox_write_token,
+            "IL_SANDBOX_ADMIN_TOKEN": settings.il_sandbox_admin_token,
+            "IL_OLLAMA_BASE_URL": ollama_info["active_url"] or "http://127.0.0.1:11434",
+            "IL_MODEL": settings.il_model,
+        })
+        test_tool = {
+            "type": "function",
+            "function": {
+                "name": "get_health",
+                "description": "Probe service health and revision",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        messages = [
+            {"role": "user", "content": "Please check the health using get_health tool."}
+        ]
+        try:
+            result = await call_model(
+                messages=messages,
+                tools=[test_tool],
+                final_schema=None,
+                settings=active_settings,
+            )
+            ollama_info["native_tools_supported"] = len(result.tool_calls) > 0
+            ollama_info["thinking_mode_disabled_supported"] = True
+            ollama_info["sample_tool_calls"] = [
+                {"name": tc.name, "args": tc.args} for tc in result.tool_calls
+            ]
+
+            # Probe structured schema mode
+            schema = {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "decision": {"type": "string", "enum": ["escalate", "propose_repair"]},
+                },
+                "required": ["summary", "decision"],
+            }
+            schema_messages = [
+                {
+                    "role": "user",
+                    "content": "Return a JSON object with summary 'OK' and decision 'escalate'.",
+                }
+            ]
+            schema_res = await call_model(
+                messages=schema_messages,
+                tools=[],
+                final_schema=schema,
+                settings=active_settings,
+            )
+            ollama_info["schema_mode_supported"] = (
+                schema_res.diagnosis is not None
+                and schema_res.diagnosis.get("decision") in ("escalate", "propose_repair")
+            )
+            ollama_info["sample_diagnosis"] = schema_res.diagnosis
+        except Exception as exc:
+            ollama_info["tool_probe_error"] = str(exc)
+
+    return ollama_info
+
+
+def qualify_runtime(output_path: Path | None = None) -> dict[str, Any]:
+    """Collect qualification facts and output qualification artifact."""
+    sys.stderr.write("Probing runtime and hardware environment...\n")
+
+    # Host & OS
+    os_info = {
+        "system": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "machine": platform.machine(),
+        "python_version": sys.version,
+    }
+
+    # Memory
+    mem_info = probe_memory()
+
+    # Docker & Docker Compose
+    docker_info = run_command_probe(["docker", "version"])
+    compose_info = run_command_probe(["docker", "compose", "version"])
+
+    # GPU & nvidia-smi
+    gpu_info = run_command_probe(["nvidia-smi"])
+
+    # Settings & Ollama
+    try:
+        settings = Settings.from_env()
+    except Exception:
+        # Fallback with dummy settings for pure probe without secrets
+        settings = Settings.from_mapping({
+            "IL_DATABASE_URL": "postgresql://incidentlab_control:dummy@postgres:5432/incidentlab",
+            "IL_SANDBOX_DATABASE_URL": "postgresql://incidentlab_sandbox:dummy@postgres:5432/incidentlab",
+            "IL_OWNER_TOKEN": "0" * 64,
+            "IL_SANDBOX_READ_TOKEN": "1" * 64,
+            "IL_SANDBOX_WRITE_TOKEN": "2" * 64,
+            "IL_SANDBOX_ADMIN_TOKEN": "3" * 64,
+        })
+
+    ollama_info = asyncio.run(probe_ollama(settings))
+
+    # Tokenizer qualification
+    tokenizer_facts = {
+        "model_name": settings.il_model,
+        "sample_tokens": count_request_tokens([{"role": "user", "content": "Hello world"}]),
+    }
+
+    qualification = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "os_info": os_info,
+        "memory": mem_info,
+        "docker": docker_info,
+        "docker_compose": compose_info,
+        "gpu": gpu_info,
+        "ollama": ollama_info,
+        "tokenizer": tokenizer_facts,
+    }
+
+    if output_path is None:
+        output_path = Path("artifacts/qualification.json")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(qualification, f, indent=2)
+
+    sys.stderr.write(f"Qualification facts written to {output_path}\n")
+    return qualification
+
+
+def main():
+    parser = argparse.ArgumentParser(description="IncidentLab CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # qualify command
+    qualify_parser = subparsers.add_parser(
+        "qualify", help="Probe and qualify hardware, runtime, and model"
+    )
+    qualify_parser.add_argument("--output", type=Path, default=Path("artifacts/qualification.json"))
+
+    # Stubs for subsequent tasks/phases
+    subparsers.add_parser("migrate", help="Run database migrations (P0)")
+    subparsers.add_parser("smoke-checkout", help="Run healthy checkout check (P0)")
+    subparsers.add_parser("index-runbooks", help="Index versioned runbooks (P1)")
+    subparsers.add_parser("seed", help="Seed a fault scenario (P1)")
+    subparsers.add_parser("smoke-demo", help="Run interactive demo recovery (P2)")
+    subparsers.add_parser("resolve-unknown", help="Resolve unknown execution state (P3)")
+
+    args = parser.parse_args()
+
+    future_cmds = (
+        "migrate", "smoke-checkout", "index-runbooks", "seed", "smoke-demo", "resolve-unknown"
+    )
+    if args.command == "qualify":
+        result = qualify_runtime(args.output)
+        print(json.dumps(result, indent=2))
+    elif args.command in future_cmds:
+        sys.stderr.write(
+            f"Command '{args.command}' belongs to a later task/phase and is not yet implemented.\n"
+        )
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

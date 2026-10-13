@@ -1,0 +1,77 @@
+name: incidentlab
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-incidentlab}
+      POSTGRES_USER: ${POSTGRES_USER:-incidentlab_migrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required local secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-incidentlab_migrator} -d $${POSTGRES_DB:-incidentlab}"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  control:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      IL_BIND_HOST: "0.0.0.0"
+      IL_PORT: "8000"
+      IL_DATABASE_URL: ${IL_DATABASE_URL:?Required control DSN}
+      IL_SANDBOX_DATABASE_URL: ${IL_SANDBOX_DATABASE_URL:?Required sandbox DSN}
+      IL_OWNER_TOKEN: ${IL_OWNER_TOKEN:?Required owner token}
+      IL_SANDBOX_READ_TOKEN: ${IL_SANDBOX_READ_TOKEN:?Required read token}
+      IL_SANDBOX_WRITE_TOKEN: ${IL_SANDBOX_WRITE_TOKEN:?Required write token}
+      IL_SANDBOX_ADMIN_TOKEN: ${IL_SANDBOX_ADMIN_TOKEN:?Required admin token}
+      IL_SANDBOX_BASE_URL: "http://sandbox:8001"
+      IL_OLLAMA_BASE_URL: "http://ollama:11434"
+      IL_MODEL: ${IL_MODEL:-qwen3:8b}
+      IL_LOG_LEVEL: ${IL_LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sandbox:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    command: ["uv", "run", "uvicorn", "incidentlab.sandbox.api:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      IL_SANDBOX_PORT: "8001"
+      IL_SANDBOX_DATABASE_URL: ${IL_SANDBOX_DATABASE_URL:?Required sandbox DSN}
+      IL_SANDBOX_READ_TOKEN: ${IL_SANDBOX_READ_TOKEN:?Required read token}
+      IL_SANDBOX_WRITE_TOKEN: ${IL_SANDBOX_WRITE_TOKEN:?Required write token}
+      IL_SANDBOX_ADMIN_TOKEN: ${IL_SANDBOX_ADMIN_TOKEN:?Required admin token}
+      IL_LOG_LEVEL: ${IL_LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  ollama_data:

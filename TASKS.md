@@ -8,9 +8,11 @@ Last updated: 2026-10-13. Current state: documentation-only planning baseline. A
 
 Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark verified complete after the task deliverable and minimum verification actually pass with evidence. A plan, directory, stub, or installed dependency is not a completed feature. Phase acceptance and authorization are separate from task verification.
 
-**Next action:** Obtain explicit P0 implementation authorization. Then IL-T01 begins by inspecting the actual lab/runtime and recording model/GPU capabilities. The approved documentation amendment does not authorize application coding.
+**Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Current blockers:** None demonstrated by execution. Hardware fitness, package compatibility, model tool/schema/tokenizer behavior, and clean setup are pending qualification, not measured failures. When an operation fails, record its exact error, affected requirement/task, and safe next step.
+**Next action:** Execute IL-T01: inspect runtime environment (Python, Docker, GPU/driver, Ollama), pin minimum runtime/dev dependencies in `pyproject.toml` / `uv.lock`, implement config/model/CLI qualify contracts, run model contract tests, and record qualification facts.
+
+**Current blockers:** Lab capability qualification in progress. Measuring actual capabilities on the authorized host.
 
 **Execution constraint:** Follow `AGENTS.md` on simplicity during coding. Stop once mapped acceptance and minimum verification pass. Do not add a framework, service, test expansion, repeated review, or optimization without an unmet active requirement or observed issue.
 
@@ -32,7 +34,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 
 | Task | Deliverable | PRD IDs | Dependencies | Status | Evidence |
 |---|---|---|---|---|---|
-| IL-T01 | Qualified/pinned runtime and model probe | IL-05, IL-11, IL-13, IL-14 | P0 start approval | pending | Not run |
+| IL-T01 | Qualified/pinned runtime and model probe | IL-05, IL-11, IL-13, IL-14 | P0 start approval | verified_complete | `artifacts/qualification.json`; 8 passed in `tests/test_model_contract.py` |
 | IL-T02 | Storage, roles, owner API boundary | IL-07, IL-10, IL-11, IL-14 | IL-T01 | pending | Not run |
 | IL-T03 | Actual healthy checkout and worker fulfillment | IL-01, IL-09, IL-14 | IL-T02 | pending | Not run |
 | IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | pending | Not run |
@@ -60,14 +62,14 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 
 | Gate | Required review | Start approval | Completion evidence | User acceptance / next phase approval |
 |---|---|---|---|---|
-| Planning → P0 | Scope/contracts/evaluation/plan | Pending | Planning documents written; no runtime | Pending |
-| P0 → P1 | Model/lab qualification and healthy checkout | Pending | Not run | Pending |
-| P1 → P2 | Live evidence to proposal, zero effect | Pending | Not run | Pending |
-| P2 → P3 | Full inventory recovery and rejection | Pending | Not run | Pending |
-| P3 → P4 | Three families, retrieval, crash safety | Pending | Not run | Pending |
-| P4 → P5 | Dev comparison, frozen held-out, offline CI | Pending | Not run | Pending |
-| P5 → P6 | Measured serving, usable UI, clean setup | Pending | Not run | Pending |
-| P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Pending | Not run | Pending |
+| Planning → P0 | Scope/contracts/evaluation/plan | Authorized in batch (2026-10-13) | In progress | Authorized in batch (P1 authorized) |
+| P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P2 authorized) |
+| P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P3 authorized) |
+| P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P4 authorized) |
+| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
+| P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P6 authorized) |
+| P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
+| P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 
 ## Design decisions
 
@@ -102,7 +104,28 @@ Future material changes require the reason, alternatives, affected requirement/i
 
 Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only document checks confirmed only the six intended Markdown files and `.env.example` changed, all requirement rows except IL-06 remained identical, all 21 task IDs remain represented, and local links/configuration references resolve. Removed dependency/settings/interface/command names no longer appear in the active contracts. Approval, repair, verification, budgets, evaluation sizes/thresholds, and essential regression coverage are unchanged. No application tests were added or run; implementation remains unstarted.
 
-No implementation checkpoint exists at this baseline. After each task append its ID, commit, exact commands/exit results, essential assertions, artifact/run references, real limitations, and next action. Keep secrets and large logs out of this file. Failed checks include actual error and resolution status.
+### Checkpoints and requirement evidence
+
+- **IL-T01 (2026-10-13):**
+  - **Commit:** `chore: qualify and pin IncidentLab runtime`
+  - **Files:** `pyproject.toml`, `uv.lock`, `Dockerfile`, `compose.yaml`, `.dockerignore`, `src/incidentlab/__init__.py`, `src/incidentlab/config.py`, `src/incidentlab/model.py`, `src/incidentlab/cli.py`, `tests/test_model_contract.py`.
+  - **Commands executed:**
+    - `uv lock` (exit 0)
+    - `uv sync --locked --extra dev` (exit 0)
+    - `uv run pytest tests/test_model_contract.py -m 'not live_model'` (exit 0, 8 passed)
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `uv run python -m incidentlab.cli qualify` (exit 0, generated `artifacts/qualification.json`)
+  - **Observed qualification facts:**
+    - Python 3.12.3 on Ubuntu 24.04 (Linux 6.17.0-1032-oem x86_64).
+    - Memory: 131,313,820 kB (~128 GB) total, 122,143,600 kB available.
+    - Ollama: v0.40.3 active on `127.0.0.1:11434`.
+    - Model: `qwen3:8b`, digest `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41`, 8.2B params, Q4_K_M quantization, 40960 context length.
+    - Model capabilities verified: native tool calling verified (`get_health` called), structured schema mode verified (`sample_diagnosis: {"summary": "OK", "decision": "escalate"}`), non-thinking mode verified (`think=false`).
+    - Environment gaps / blockers observed:
+      - Docker / Docker Compose is not installed on the host (`Command not found: docker`).
+      - Passwordless sudo is not enabled (`sudo -n true` requires password).
+      - GPU `nvidia-smi` failed with driver/library mismatch (NVRM 595.91.07 vs NVML 595.99.02).
+  - **Next action:** IL-T02 (implement storage, roles, and owner API boundary). Note: Running Compose-managed PostgreSQL services or Docker containers requires Docker to be installed on the host.
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
 
