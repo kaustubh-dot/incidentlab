@@ -6,7 +6,7 @@
 
 **Architecture:** One FastAPI control application and one tiny separate sandbox process in the same repository; one PostgreSQL instance and one Ollama provider. One LangGraph agent uses read-only MCP and retrieved runbooks. Server-owned approval, execution, and verification control effects.
 
-**Stack:** Python 3.12, FastAPI, Pydantic 2, psycopg 3, PostgreSQL 16/pgvector, LangGraph PostgreSQL checkpointer, official MCP Python SDK, Ollama AsyncClient, sentence-transformers, React/TypeScript/Vite, Docker Compose. Qualify and lock compatible versions in P0; Node.js 24 LTS is the frontend baseline.
+**Stack:** Python 3.12, FastAPI, Pydantic 2, psycopg 3, PostgreSQL 16, LangGraph PostgreSQL checkpointer, official MCP Python SDK, Ollama AsyncClient, qualified CPU-only tokenizer via transformers, React/TypeScript/Vite, Docker Compose. Qualify and lock compatible versions in P0; Node.js 24 LTS is the frontend baseline.
 
 **Spec:** `PRD.md` owns vision, `ARCHITECTURE.md` owns interfaces, `EVALUATION.md` owns measurement, and `TASKS.md` alone owns actual status and approvals. Planned commands and tests below have not been executed.
 
@@ -25,7 +25,7 @@
 
 Commands are future Linux-lab commands from the repository root. They become available only when the named task creates their files. `uv sync --locked --extra dev` requires IL-T01's lockfile. No command may silently seed answers, approve a live demo, or reset an unrelated database.
 
-The planned CLI entry points are `qualify`, `migrate`, `smoke-checkout` (P0); `seed --family inventory_config --seed 1` and `index-runbooks --mode keyword` (P1); `smoke-demo --family inventory_config --approval interactive` (P2); the additional finite families, `compare-retrieval --split dev`, and `resolve-unknown --incident <UUID>` (P3). P4 adds `evals.run`/`evals.score`; P5 adds `evals.benchmark`. Each prints machine-readable results to stdout and operational diagnostics to stderr; failures use nonzero exit status.
+The planned CLI entry points are `qualify`, `migrate`, `smoke-checkout` (P0); `seed --family inventory_config --seed 1` and `index-runbooks` (P1); `smoke-demo --family inventory_config --approval interactive` (P2); the additional finite families and `resolve-unknown --incident <UUID>` (P3). P4 adds `evals.run`/`evals.score`; P5 adds `evals.benchmark`. Each prints machine-readable results to stdout and operational diagnostics to stderr; failures use nonzero exit status. Retrieval stays keyword-only; no comparison command or mode selector is required.
 
 After IL-T01, copy `.env.example` to ignored `.env`:
 
@@ -56,7 +56,7 @@ docker compose --profile gpu up -d sandbox control
 docker compose exec -T control python -m incidentlab.cli smoke-checkout
 ```
 
-`migrate` checks PostgreSQL readiness with a bounded 30-second wait and actionable error. It does not require the HTTP service to start against an uninitialized schema. The Compose control service binds `0.0.0.0` internally but publishes only `127.0.0.1:8000` on the host. P1 adds `docker compose exec -T control python -m incidentlab.cli index-runbooks --mode keyword`; later use the selected mode. Record verified image/package/model digests at qualification rather than assuming mutable tags are reproducible.
+`migrate` checks PostgreSQL readiness with a bounded 30-second wait and actionable error. It does not require the HTTP service to start against an uninitialized schema. The Compose control service binds `0.0.0.0` internally but publishes only `127.0.0.1:8000` on the host. P1 adds `docker compose exec -T control python -m incidentlab.cli index-runbooks`. Record verified image/package/model digests at qualification rather than assuming mutable tags are reproducible.
 
 Offline local command: `uv run pytest -m 'not live_model and not integration'`. Transaction tests use an isolated test database and actual sandbox. No fixture resets the owner's running demo. Live E2E is explicitly marked `live_model`; it is not a normal PR requirement.
 
@@ -170,7 +170,7 @@ Fixtures use real sandbox HTTP/test DB; `wait_for_order` only polls. **Expected:
 
 **PRD:** IL-03, IL-04, IL-06, IL-11. **Depends on:** IL-T04. **Files:** Create `src/incidentlab/{mcp_server.py,mcp_client.py,retrieval.py}`, `tests/{test_mcp_boundary.py,test_retrieval.py}`; extend `cli.py`.
 
-**Interfaces:** Exactly four architecture MCP tools, `call_read_tool(...)->EvidenceItem`, `retrieve_runbooks(query,mode="keyword",limit=3)`, `index-runbooks --mode keyword`; `build_mcp_environment(settings)->dict[str,str]` constructs the exact read-only env subset. Backend owns fixed stdio command and rejects registry mismatch.
+**Interfaces:** Exactly four architecture MCP tools, `call_read_tool(...)->EvidenceItem`, `retrieve_runbooks(query,limit=3)`, `index-runbooks`; `build_mcp_environment(settings)->dict[str,str]` constructs the exact read-only env subset. Backend owns fixed stdio command and rejects registry mismatch.
 
 - [ ] Use official SDK stdio lifecycle; stdout is protocol-only. Launch only the fixed module with read token/base URL and safe runtime paths, never inherited complete env.
 - [ ] Validate bounded args/results and current-incident request/order scope; persist evidence before passing it to the model. Log truncation/retries explicitly.
@@ -256,9 +256,9 @@ async def test_green_health_is_not_recovery(verifier, broken_target):
 
 **P2 verification/completion:** Critical live E2E, rejection/no-effect run, production frontend build, actual receipt/new order. **STOP:** Demonstrate the complete inventory slice and obtain P3 approval; remaining families stay explicitly pending.
 
-## P3 — Complete the three families, retrieval comparison, and restart safety
+## P3 — Complete the three families, grounded context, and restart safety
 
-**Objective/deliverable:** Full v1 behavior, one bounded retrieval comparison, and durable authority across restart/cancellation. **PRD:** IL-02–09, IL-11–12. **Prerequisites:** Accepted P2 and P3 approval. **Components:** IL-T10–12. **Exit:** Two recoverable families, honest maintenance escalation, measured retrieval choice, and safe handling of interrupted execution.
+**Objective/deliverable:** Full v1 behavior, checked runbook grounding and context bounds, and durable authority across restart/cancellation. **PRD:** IL-02–09, IL-11–12. **Prerequisites:** Accepted P2 and P3 approval. **Components:** IL-T10–12. **Exit:** Two recoverable families, honest maintenance escalation, resolvable runbook evidence, and safe handling of interrupted execution.
 
 ### IL-T10 — Add worker recovery and maintenance escalation
 
@@ -273,16 +273,16 @@ async def test_green_health_is_not_recovery(verifier, broken_target):
 
 **Essential assertions:** Worker verification reaches a new `fulfilled` order; maintenance yields `decision="escalate"`, `repair=None`, and zero repair receipts. **Expected:** Two actual repairs and one unsupported-case escalation. **Commit:** `feat: complete worker recovery and maintenance escalation`.
 
-### IL-T11 — Compare retrieval and enforce bounded context
+### IL-T11 — Check runbook grounding and enforce bounded context
 
-**PRD:** IL-03, IL-06, IL-12. **Depends on:** IL-T10. **Files:** Modify `retrieval.py`, `context.py`, `cli.py`, `tests/test_retrieval.py`, `tests/test_agent_contract.py`; create `evals/cases/dev.jsonl`, `evals/README.md`.
+**PRD:** IL-03, IL-06, IL-12. **Depends on:** IL-T10. **Files:** Modify `retrieval.py`, `context.py`, `tests/test_retrieval.py`, `tests/test_agent_contract.py`; create `evals/cases/dev.jsonl`, `evals/README.md`.
 
-**Interfaces:** `RetrievalMode=keyword|dense|hybrid`; 384-dimensional embeddings, exact cosine search, reciprocal-rank fusion constant 60. `compare-retrieval --split dev` prints per-case top-three sections/citation validity/token counts. Twelve development cases are four per family. No held-out data is used.
+**Interfaces:** Existing `retrieve_runbooks(query,limit=3)` and `build_context` contracts only. Twelve development cases are four per family; P4's existing evaluation runner records per-case retrieved sections, citation validity, and context size. No held-out data, alternate retrieval mode, or separate comparison command is used.
 
 - [ ] Define twelve meaningful dev recipes covering clear, noisy, missing, and conflicting evidence; keep operator recipe/gold facts separate from model-visible observations.
-- [ ] Pin embedding model revision; chunk sections within 200 embedding tokens and preserve stable citation ancestry. Index in existing PostgreSQL; no embedding service or ANN infrastructure.
-- [ ] Compare keyword/dense/hybrid once on identical development queries. Select the simplest useful mode; retain keyword on a tie. Verify context cap with the qualified tokenizer, retaining required evidence/revisions.
-- [ ] Run focused retrieval/context tests and `docker compose exec -T control python -m incidentlab.cli index-runbooks --mode hybrid`. Then run `docker run --rm --network incidentlab_default --env-file .env incidentlab-eval:local python -m incidentlab.cli compare-retrieval --split dev` using the rebuilt evaluation target. This command only compares retrieved sections; it does not start another incident. Normal runtime image does not contain `evals`.
+- [ ] Keep sections within 200 tokens using the already-qualified model tokenizer and preserve stable citation ancestry. Index with existing PostgreSQL full-text search; no embedding model or vector columns.
+- [ ] Use the existing retrieval/context tests to check versioned citations and the qualified tokenizer cap while retaining required evidence/revisions. Reuse all three runbooks; do not add an experiment matrix.
+- [ ] Rebuild the existing evaluation target and run `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_retrieval.py tests/test_agent_contract.py -m 'not live_model'` in the isolated test project described above. Reindex the demo with `docker compose exec -T control python -m incidentlab.cli index-runbooks`. P4 measures relevant-section coverage during the existing development runs; no additional CLI or dataset is required. Normal runtime images still exclude `evals`.
 
 **Essential example:**
 
@@ -293,7 +293,7 @@ def test_context_keeps_required_evidence_within_budget(state, qualified_tokenize
     assert "ev:fixture:1" in json.dumps(messages)
 ```
 
-The fixture makes `ev:fixture:1` approval-critical evidence; production IDs remain incident-scoped. **Expected:** Measured retrieval choice and bounded prompt, not an assumed improvement. **Commit:** `feat: compare grounded retrieval and bound agent context`.
+The fixture makes `ev:fixture:1` approval-critical evidence; production IDs remain incident-scoped. **Expected:** Resolvable keyword-retrieved evidence and a bounded prompt. **Commit:** `feat: validate runbook grounding and bound agent context`.
 
 ### IL-T12 — Prove restart, cancellation, and unknown-outcome handling
 
@@ -318,7 +318,7 @@ async def test_ack_loss_does_not_replay_mutation(crash_harness):
 
 The hook pauses around a real sandbox transaction, not mocked success. **Command:** `uv run pytest tests/test_recovery.py tests/test_approval.py tests/test_execution.py -m 'not live_model'` in the isolated integration environment. **Expected:** Safe waiting restart, receipt reconciliation, truthful cancellation/unknown outcomes. **Commit:** `fix: make approval and execution recovery durable`.
 
-**P3 verification/completion:** Worker/maintenance live evidence, bounded retrieval comparison, one actual crash/receipt check, and narrow unknown-resolution control. **STOP:** Present P3 evidence and obtain P4 approval. No additional resilience framework is justified.
+**P3 verification/completion:** Worker/maintenance live evidence, runbook citation/context checks, one actual crash/receipt check, and narrow unknown-resolution control. **STOP:** Present P3 evidence and obtain P4 approval. No additional resilience framework is justified.
 
 ## P4 — Freeze evaluation and establish lean offline CI
 
@@ -341,9 +341,9 @@ The hook pauses around a real sandbox transaction, not mocked success. **Command
 
 **PRD:** IL-03, IL-05, IL-06, IL-12. **Depends on:** IL-T13. **Files:** Create `evals/baseline.py`; modify `evals/run.py`, `evals/score.py`, `evals/README.md`, `README.md`.
 
-**Interfaces:** `run_fixed_diagnostics(incident_id:UUID)->Diagnosis` uses health/logs/config/probe in fixed order and one final schema model call. Both approaches use the same selected retrieval mode, model/digest, final schema, context/output limits, total budgets, and action/authority/verifier path. Retrieval ablation is separate. No family/gold lookup.
+**Interfaces:** `run_fixed_diagnostics(incident_id:UUID)->Diagnosis` uses health/logs/config/probe in fixed order and one final schema model call. Both approaches use the same keyword retrieval, model/digest, final schema, context/output limits, total budgets, and action/authority/verifier path. No retrieval ablation or family/gold lookup.
 
-- [ ] Implement fixed diagnostic order and paired manifests using identical target resets/seeds and selected retrieval configuration; adaptive read selection is the intended comparison.
+- [ ] Implement fixed diagnostic order and paired manifests using identical target resets/seeds and keyword retrieval configuration; adaptive read selection is the intended comparison. Include EVALUATION's relevant-section coverage, citation validity, and context size in this same development report.
 - [ ] Run all 12 dev cases for `fixed` and `agent`, approving valid proposals through the same owner endpoint. Inspect actual effects, failed cases, and citation facts.
 - [ ] Correct only observed issues within scope; rerun affected checks after a change. Record configurations and failures; no repeated broad experiment grid or cherry-picked scores.
 - [ ] Run the following in separate isolated sessions, save JSON artifacts, score them, and restore normal control afterward.
@@ -359,7 +359,7 @@ docker run --rm --network incidentlab_default --env-file .env incidentlab-eval:l
 
 **PRD:** IL-04, IL-07–09, IL-11, IL-14. **Depends on:** IL-T14. **Files:** Create `.github/workflows/ci.yml`; modify existing `tests` groups, `pyproject.toml`, `Dockerfile`, `frontend/package.json`.
 
-**Interfaces:** Pytest markers `integration` and `live_model`; one CI job with local PostgreSQL/pgvector service and sandbox fixture process. No Ollama download/call or paid inference per PR. Existing lockfiles define dependencies.
+**Interfaces:** Pytest markers `integration` and `live_model`; one CI job with local PostgreSQL service and sandbox fixture process. No Ollama download/call or paid inference per PR. Existing lockfiles define dependencies.
 
 - [ ] Complete only the focused security/integrity regression groups from `EVALUATION.md`: secret/tool boundary, untrusted evidence, bound approval, receipt/restart integrity, honest verification, auth, and evaluation provenance.
 - [ ] Configure one workflow for Ruff, offline essential pytest including database/sandbox transactions, TypeScript check, and production UI build. Explicit fake-adapter tests are labelled offline, never model-quality evidence.

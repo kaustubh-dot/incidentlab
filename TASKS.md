@@ -2,13 +2,13 @@
 
 Last updated: 2026-10-13. Current state: documentation-only planning baseline. Application implementation has not started. No model/GPU qualification, passing application test, benchmark, recovery demo, evaluation score, or implementation-phase acceptance is claimed.
 
-`PRD.md` is the frozen v1 scope for review. `ARCHITECTURE.md` owns interfaces, `EVALUATION.md` owns measurements, and `ROADMAP.md` owns execution steps. This file alone owns statuses, gates, decisions, deviations, blockers, evidence, and exact next action.
+`PRD.md` is the v1 scope with the approved pre-lock retrieval simplification recorded below. `ARCHITECTURE.md` owns interfaces, `EVALUATION.md` owns measurements, and `ROADMAP.md` owns execution steps. This file alone owns statuses, gates, decisions, deviations, blockers, evidence, and exact next action.
 
 ## Status and exact next action
 
 Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark verified complete after the task deliverable and minimum verification actually pass with evidence. A plan, directory, stub, or installed dependency is not a completed feature. Phase acceptance and authorization are separate from task verification.
 
-**Next action:** Owner reviews the five planning documents with README/AGENTS and explicitly authorizes P0 implementation. Then IL-T01 begins by inspecting the actual lab/runtime and recording model/GPU capabilities. No application coding is authorized by this documentation-only baseline itself.
+**Next action:** Obtain explicit P0 implementation authorization. Then IL-T01 begins by inspecting the actual lab/runtime and recording model/GPU capabilities. The approved documentation amendment does not authorize application coding.
 
 **Current blockers:** None demonstrated by execution. Hardware fitness, package compatibility, model tool/schema/tokenizer behavior, and clean setup are pending qualification, not measured failures. When an operation fails, record its exact error, affected requirement/task, and safe next step.
 
@@ -42,7 +42,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T08 | Repair, receipt and functional verification | IL-08, IL-09, IL-11 | IL-T07 | pending | Not run |
 | IL-T09 | Thin UI and first complete live E2E | IL-01, IL-03, IL-07, IL-08, IL-09, IL-10, IL-14 | IL-T08 | pending | Not run |
 | IL-T10 | Worker recovery and maintenance escalation | IL-02, IL-03, IL-08, IL-09 | P2 accepted; P3 approved; IL-T09 | pending | Not run |
-| IL-T11 | Retrieval comparison and bounded context | IL-03, IL-06, IL-12 | IL-T10 | pending | Not run |
+| IL-T11 | Runbook grounding and bounded context | IL-03, IL-06, IL-12 | IL-T10 | pending | Not run |
 | IL-T12 | Restart/cancel/unknown outcome integrity | IL-07, IL-08, IL-09, IL-11 | IL-T10, IL-T11 | pending | Not run |
 | IL-T13 | Frozen cases, isolated runner and scoring | IL-11, IL-12 | P3 accepted; P4 approved; IL-T12 | pending | Not run |
 | IL-T14 | Fixed-versus-agent development comparison | IL-03, IL-05, IL-06, IL-12 | IL-T13 | pending | Not run |
@@ -82,7 +82,7 @@ These are baseline design decisions, not proof of implementation or separate per
 | IL-D05 | Immutable proposal, bound owner decision, claim and receipt | Exact payload/revision and one effect per key; no distributed exactly-once claim. |
 | IL-D06 | Fresh checkout fulfillment establishes recovery | Health, acknowledgment, or confidence alone cannot prove recovery. |
 | IL-D07 | Polling `/api/v1` and token in UI memory | Enough for one private owner, without SSE/auth-platform scope. |
-| IL-D08 | Small keyword/dense/hybrid dev comparison | Select measured useful retrieval; no reranker or assumed gain. |
+| IL-D08 | Keyword runbook retrieval, checked in existing dev runs | Approved simplification: preserve cited grounding without duplicating MoneyTrail's deep RAG experiments. No embedding/vector dependency or alternate-mode framework. |
 | IL-D09 | 12 dev / 18 held-out with evidence variations | Actual outcomes and uncertainty, with gold absent from runtime context. |
 | IL-D10 | Transient evaluation image, same app contracts | Essential integration tests/harness without an extra running service. |
 | IL-D11 | One offline CI job and focused checks | Protect required behavior without model calls per PR or coverage quotas. |
@@ -92,9 +92,15 @@ These are baseline design decisions, not proof of implementation or separate per
 
 ## Deviations
 
-No scope deviation is approved or implemented. A substantial conflict record must include date, affected requirement/task/interface, observed evidence, proposed change, alternatives, acceptance/security/cost impact, user approval reference, and resulting commit. Until approval preserve original scope and pause only dependent work. Routine compatible dependency pins are documented choices; adding a provider/service/action/fault family or lowering an acceptance gate is a scope change.
+2026-10-13, approved pre-lock amendment (IL-06; IL-T05/IL-T11 and dependent documentation): use versioned keyword runbook retrieval and existing development cases to measure grounding. Remove mandatory dense/hybrid experiments, embedding/vector dependencies, mode settings, and comparison commands. The simpler option is sufficient for the three-runbook scope; MoneyTrail retains the portfolio's deep RAG work, without becoming a runtime dependency. Dense/hybrid remains deferred and requires an observed retrieval failure plus separate approval. Investigation, MCP, context bounds, approval, repairs, verification, serving, outcome thresholds, and existing essential regression groups are unchanged.
+
+Approval reference: the user approved the three pre-lock amendments across both projects with “Approved but ensure you dont overengineer , overdo and drift apart from the original intended vision”. This authorizes documentation alignment only, not P0 implementation or any phase acceptance. PRD, ARCHITECTURE, EVALUATION, ROADMAP, README, and `.env.example` are synchronized with this decision.
+
+Future material changes require the reason, alternatives, affected requirement/interface, acceptance/security/cost impact, and explicit approval. Until approval preserve this scope and pause only dependent work. Routine compatible dependency pins are documented choices; adding a provider/service/action/fault family or lowering an acceptance gate is a scope change.
 
 ## Checkpoints and requirement evidence
+
+Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only document checks confirmed only the six intended Markdown files and `.env.example` changed, all requirement rows except IL-06 remained identical, all 21 task IDs remain represented, and local links/configuration references resolve. Removed dependency/settings/interface/command names no longer appear in the active contracts. Approval, repair, verification, budgets, evaluation sizes/thresholds, and essential regression coverage are unchanged. No application tests were added or run; implementation remains unstarted.
 
 No implementation checkpoint exists at this baseline. After each task append its ID, commit, exact commands/exit results, essential assertions, artifact/run references, real limitations, and next action. Keep secrets and large logs out of this file. Failed checks include actual error and resolution status.
 

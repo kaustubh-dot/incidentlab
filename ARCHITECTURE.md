@@ -26,11 +26,11 @@ Ollama and PostgreSQL may retain data across demo runs. Reset clears only the sa
 
 | Decision | Contract and reason |
 |---|---|
-| Runtime | Python 3.12; FastAPI, Pydantic 2, psycopg 3 SQL, httpx, official MCP Python SDK, LangGraph plus PostgreSQL checkpointer, Ollama Python `AsyncClient`, sentence-transformers. Pin mutually compatible versions in `uv.lock` during P0. No ORM or dependency framework is needed. |
-| Storage | PostgreSQL 16 with pgvector extension available; one instance, separate `control` and `sandbox` schemas plus a `checkpoints` search path for the checkpointer. Simple numbered SQL migrations and a migration ledger are sufficient. |
+| Runtime | Python 3.12; FastAPI, Pydantic 2, psycopg 3 SQL, httpx, official MCP Python SDK, LangGraph plus PostgreSQL checkpointer, Ollama Python `AsyncClient`, and the qualified CPU-only tokenizer via `transformers`. Pin mutually compatible versions in `uv.lock` during P0. No ORM or dependency framework is needed. |
+| Storage | PostgreSQL 16; one instance, separate `control` and `sandbox` schemas plus a `checkpoints` search path for the checkpointer. Simple numbered SQL migrations and a migration ledger are sufficient. No vector extension is required. |
 | UI | React, TypeScript, Vite; ordinary CSS; one page with checkout/scenario panel, investigation, evidence/timeline, and approval/outcome. Lock frontend versions in `package-lock.json`. |
 | Model | `qwen3:8b` through native Ollama API is a candidate, not a qualified guarantee. Record exact tag, digest, quantization, licence, runtime version, tool/schema capability, tokenizer, and observed GPU use. No provider abstraction beyond one small client module. |
-| Retrieval | Keyword baseline, then development comparison with dense cosine similarity or reciprocal-rank hybrid retrieval over pgvector. Select by measured usefulness; no reranker. `all-MiniLM-L6-v2` runs as a small embedding component, not another reasoning agent. |
+| Retrieval | PostgreSQL full-text keyword search over versioned runbook sections. Check grounding on development cases; no embedding model, vector columns, reranker, or retrieval-mode framework. Dense/hybrid work remains deferred pending an observed failure and separate user approval. |
 | State | One incident ID equals one LangGraph `thread_id`. Application records are authoritative for approval and repair; graph state is orchestration data. Never treat a checkpoint as permission to write. |
 | Execution | One backend process, one active incident, one asyncio background investigation task, one sandbox worker. No broker, queue service, distributed scheduler, or automatic parallel investigations. |
 
@@ -52,7 +52,7 @@ src/incidentlab/
   model.py                          one Ollama AsyncClient adapter and token accounting
   graph.py                          primary agent nodes, state, pause/resume orchestration
   context.py                        bounded evidence notes and recent result assembly
-  retrieval.py                      runbook loading, indexing, keyword/dense/hybrid search
+  retrieval.py                      runbook loading, indexing, keyword search
   mcp_client.py                     fixed stdio child ownership and four-tool allowlist
   mcp_server.py                     read-only tools using sandbox diagnostic credential
   approvals.py                      proposal freeze, owner decision, atomic claim
@@ -184,7 +184,7 @@ Canonical payload serialization is UTF-8 JSON with lexicographically sorted keys
 | `call_model(messages:list[dict], tools:list[dict], final_schema:dict or None) -> ModelResult` (async) | One Ollama native request; validate structured output and record actual usage/error. |
 | `call_read_tool(incident_id:UUID, name:ToolName, args:dict) -> EvidenceItem` (async) | Validate allowlist/scope, call MCP, persist sanitized evidence. |
 | `build_context(state:AgentState, token_budget:int=6000) -> list[dict]` | Assemble and count bounded evidence-linked model context. |
-| `retrieve_runbooks(query:str, mode:RetrievalMode, limit:int=3) -> list[EvidenceItem]` (async) | Return versioned sections using the selected bounded retrieval method. |
+| `retrieve_runbooks(query:str, limit:int=3) -> list[EvidenceItem]` (async) | Return versioned sections using bounded keyword retrieval. |
 | `decide_proposal(incident_id:UUID, owner_id:str, decision:ApprovalDecision) -> ApprovalView` (async) | Atomically bind authenticated owner decision to stored proposal. |
 | `claim_execution(incident_id:UUID, proposal_id:UUID) -> ExecutionClaim` (async) | Atomically create one execution key after authority checks. |
 | `execute_claim(claim:ExecutionClaim) -> RepairReceipt` (async) | Dispatch the stored finite repair once, never automatically retry mutation. |
@@ -193,7 +193,7 @@ Canonical payload serialization is UTF-8 JSON with lexicographically sorted keys
 | `verify_checkout(incident_id:UUID, request_key:UUID) -> VerificationResult` (async) | Request a fresh checkout through executor and read persisted fulfillment. |
 | `resolve_unknown(incident_id:UUID, acknowledgement:str, note:str) -> IncidentView` (async, local owner CLI only) | After operator quiescence, inspect receipt/target and record explicit unresolved closure without an effect or success claim. |
 
-`ToolName` is the four-name MCP enum; `RetrievalMode` is `keyword|dense|hybrid`. `AgentState` contains incident ID, phase, evidence ID list, evidence-linked case notes, two recent result references, read/model counters, accumulated active milliseconds, diagnosis, proposal ID, and cancellation flag. `CheckoutAccepted` contains request ID, order ID, and `pending` status; dependency failure is a typed error, not an accepted order. These are interface contracts, not incomplete executable stubs.
+`ToolName` is the four-name MCP enum. Retrieval is fixed to keyword search; no mode enum is needed. `AgentState` contains incident ID, phase, evidence ID list, evidence-linked case notes, two recent result references, read/model counters, accumulated active milliseconds, diagnosis, proposal ID, and cancellation flag. `CheckoutAccepted` contains request ID, order ID, and `pending` status; dependency failure is a typed error, not an accepted order. These are interface contracts, not incomplete executable stubs.
 
 `StartIncident={symptom:str[1..2000],request_id:UUID,order_id:UUID|null}`. `IncidentView` contains ID, state, timestamps, diagnosis/proposal/outcome, and last event sequence, never credentials or fixture IDs. `ModelResult={tool_calls:list[ValidatedToolCall],diagnosis:Diagnosis|null,input_tokens:int|null,output_tokens:int|null,duration_ms:int}`. `ApprovalView` is stored proposal/decision/reviewer/decision time. `ExecutionClaim` is stored execution key, proposal binding, expected revision, validated payload, and state. `ExecutionView` adds receipt and reconciliation/error status. Exact frontend types mirror OpenAPI schemas.
 
@@ -210,7 +210,7 @@ The backend launches the fixed command `python -m incidentlab.mcp_server` using 
 | `get_config` | `{}` | Sanitized current endpoint/worker configuration. |
 | `probe_checkout` | `{order_id:UUID|null}` | Read-only dependency/order result; order restricted to current incident. |
 
-Runbook retrieval is a bounded graph function, not an arbitrary file tool. Index Markdown sections using stable `runbook_id`, explicit `source_version`, section heading/ID, and content hash. Each section is at most 200 embedding tokens; split longer sections into stable numbered pieces without losing citation parent. Start with three runbooks and their operational symptoms, diagnostic checks, permitted repair/preconditions, verification, and escalation guidance. No scenario IDs or gold outcomes enter the corpus. Keyword uses PostgreSQL full-text rank. Dense stores 384-dimensional embeddings and cosine distance. Hybrid retrieves up to six results from each and uses reciprocal rank with constant 60, deduplicates by chunk ID, returns top three. Exact vector scan is enough for this corpus; no approximate index or embedding service is required. The model card describes the embedding model and dimensionality; pin its actual revision. [Model card](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), [pgvector documentation](https://github.com/pgvector/pgvector).
+Runbook retrieval is a bounded graph function, not an arbitrary file tool. Index Markdown sections using stable `runbook_id`, explicit `source_version`, section heading/ID, and content hash. Each section is at most 200 tokens using the already-qualified model tokenizer; split longer sections into stable numbered pieces without losing citation parent. Start with three runbooks and their operational symptoms, diagnostic checks, permitted repair/preconditions, verification, and escalation guidance. No scenario IDs or gold outcomes enter the corpus. Use PostgreSQL full-text rank, deduplicate by chunk ID, and return at most three sections with resolvable versioned citations. No embedding dependency, vector storage, or retrieval-mode configuration belongs in active v1 scope. Assess grounding through the existing development cases, not a separate retrieval experiment suite.
 
 The graph obtains initial health and relevant logs through MCP, retrieves runbooks from those symptoms, then asks the model for additional tool calls or a final diagnosis. Initial calls count toward the six-call budget. Use at most four model turns total, including the final structured answer; reserve the fourth for the final schema and disable further tool selection then. Native tool calling and schema mode may be separate calls if qualification requires it; both consume the same four-turn budget. Qualify the actual SDK/API support for `think=false` and explicitly disable Qwen thinking in this bounded tool/JSON workflow, so the 1,024 output cap is not consumed by hidden reasoning. Unsupported behavior fails qualification pending a documented compatible configuration; never silently increase budgets or swap providers. Never parse executable commands from prose. Ollama's native chat API is the integration contract; record returned token counts and timing fields when present. [Ollama native chat API](https://docs.ollama.com/api/chat).
 
@@ -240,7 +240,7 @@ any active state -> failed or cancellation request (subject to in-flight rule)
 | `control.approvals` | `proposal_id` unique, decision, authenticated `owner_id="owner"`, reviewed digest/revision, decided time. No model inserts. |
 | `control.executions` | `execution_key` primary key, `proposal_id` unique, state `claimed\|dispatching\|applied\|precondition_failed\|unknown`, payload digest, expected revision, claim/dispatch times, receipt/error JSON. |
 | `control.events` | `(incident_id,seq)` primary key allocated under incident row lock, event type/time, safe payload, duration/token fields; append-only, ordered polling. |
-| `control.runbook_chunks` | chunk ID primary key, runbook/version/section, content hash/text, tsvector, nullable `vector(384)`, embedding model revision. |
+| `control.runbook_chunks` | chunk ID primary key, runbook/version/section, content hash/text, tsvector. |
 | `control.schema_migrations` | integer version primary key, checksum, applied time; mismatched checksum fails startup/migration. |
 | `checkpoints.*` | Official LangGraph PostgreSQL checkpointer tables created by its setup method under this restricted search path; do not hand-roll checkpoint serialization. |
 | `sandbox.target_state` | single row, monotonic revision, endpoint enum, worker flag, maintenance flag; lock this row for fault/configuration/repair mutations. |
@@ -315,8 +315,6 @@ Failure codes include `unauthorized`, `active_incident_exists`, `provider_unavai
 | `IL_SANDBOX_BASE_URL` | `http://sandbox:8001`; fixed deployment configuration, not a model argument. |
 | `IL_OLLAMA_BASE_URL` | `http://ollama:11434`; one local inference provider. |
 | `IL_MODEL` | `qwen3:8b` initial candidate; pin qualified digest in run manifest and deployment instructions. |
-| `IL_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2`; pin qualified revision. |
-| `IL_RETRIEVAL_MODE` | `keyword` initially; only `keyword`, `dense`, or `hybrid`; chosen from development comparison. |
 | `IL_MODEL_TIMEOUT_SECONDS` / `IL_ACTIVE_DEADLINE_SECONDS` | `60` / `240`. |
 | `IL_MAX_MODEL_TURNS` / `IL_MAX_READ_CALLS` | `4` / `6`. |
 | `IL_MAX_INPUT_TOKENS` / `IL_MAX_OUTPUT_TOKENS` | `6000` / `1024`. |
@@ -328,4 +326,4 @@ Do not expose the migration role, admin token, or write token to prompts, event 
 
 `verify_checkout` generates a new request key, calls sandbox checkout, waits up to ten seconds polling persisted order every 250 ms, and reads `GET /orders/{id}` after fulfillment. A pass requires the returned IDs to match the new request and status to be `fulfilled`; any wrong ID, timeout, dependency failure, or unreadable order is fail/error. The graph cannot manufacture a `VerificationResult`; only verifier code creates `kind="verification"` evidence and the server sets `verified_recovered` from its pass plus an applied receipt.
 
-Events use `incident.created`, `state.changed`, `model.started`, `model.finished`, `tool.started`, `tool.finished`, `retrieval.finished`, `proposal.created`, `approval.decided`, `execution.claimed`, `execution.dispatched`, `execution.receipt`, `verification.finished`, `cancel.requested`, and `error`. Each event contains incident ID, monotonic sequence, UTC timestamp, component, safe payload, and optional measured milliseconds/token counts. Record tool attempts, model version/digest, retrieval mode/version, budget counters, approval wait, actual effects, and verification IDs. Do not persist hidden reasoning or chain-of-thought; use concise evidence-linked summaries and observable calls/results. Local PostgreSQL events and the UI timeline satisfy observability without an external service.
+Events use `incident.created`, `state.changed`, `model.started`, `model.finished`, `tool.started`, `tool.finished`, `retrieval.finished`, `proposal.created`, `approval.decided`, `execution.claimed`, `execution.dispatched`, `execution.receipt`, `verification.finished`, `cancel.requested`, and `error`. Each event contains incident ID, monotonic sequence, UTC timestamp, component, safe payload, and optional measured milliseconds/token counts. Record tool attempts, model version/digest, retrieved section IDs/versions, budget counters, approval wait, actual effects, and verification IDs. Do not persist hidden reasoning or chain-of-thought; use concise evidence-linked summaries and observable calls/results. Local PostgreSQL events and the UI timeline satisfy observability without an external service.

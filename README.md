@@ -13,13 +13,15 @@ An operator sees a working fake checkout fail, asks the agent to investigate, in
 Planned capabilities:
 
 - One small functional sandbox checkout with three deliberately bounded fault families.
-- Investigation using application observations, real emitted logs, and cited runbooks.
+- Investigation using application observations, real emitted logs, and versioned runbooks retrieved with keyword search.
 - Read-only diagnostic tools exposed through a small MCP interface.
 - A clear proposal and approval screen, safe pause/resume, and action receipts.
 - Actual end-to-end recovery verification or explicit escalation when no allowed repair exists.
 - Inspectable traces, a fixed-workflow baseline, and a small outcome-based evaluation.
 
 This is not an autonomous DevOps platform, cloud administrator, unrestricted coding agent, or real payment system. Fine-tuning is not required.
+
+Dense/hybrid retrieval experiments are outside active scope unless an observed retrieval failure justifies a separately approved change. The required focus remains investigation, approval, bounded repair, and verified recovery.
 
 ## Read the planning pack
 
