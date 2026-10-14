@@ -277,14 +277,23 @@ def main():
         "--timeout", type=float, default=10.0, help="Fulfillment timeout in seconds"
     )
 
+    seed_parser = subparsers.add_parser("seed", help="Seed a fault scenario (P1)")
+    seed_parser.add_argument(
+        "--family",
+        type=str,
+        default="inventory_config",
+        choices=["inventory_config", "worker_paused", "upstream_maintenance"],
+        help="Fault family to inject",
+    )
+    seed_parser.add_argument("--seed", type=int, default=1, help="Variant seed")
+
     subparsers.add_parser("index-runbooks", help="Index versioned runbooks (P1)")
-    subparsers.add_parser("seed", help="Seed a fault scenario (P1)")
     subparsers.add_parser("smoke-demo", help="Run interactive demo recovery (P2)")
     subparsers.add_parser("resolve-unknown", help="Resolve unknown execution state (P3)")
 
     args = parser.parse_args()
 
-    future_cmds = ("index-runbooks", "seed", "smoke-demo", "resolve-unknown")
+    future_cmds = ("index-runbooks", "smoke-demo", "resolve-unknown")
     if args.command == "qualify":
         result = qualify_runtime(args.output)
         print(json.dumps(result, indent=2))
@@ -365,6 +374,50 @@ def main():
                 return 1
 
         sys.exit(asyncio.run(run_smoke()))
+    elif args.command == "seed":
+        from uuid import uuid4
+
+        import httpx
+
+        from incidentlab.executor import submit_checkout, wait_for_order_fulfillment
+
+        async def run_seed():
+            settings = Settings.from_env()
+            admin_headers = {"Authorization": f"Bearer {settings.il_sandbox_admin_token}"}
+
+            # 1. Reset sandbox to healthy baseline first
+            sys.stderr.write("Resetting sandbox to healthy baseline...\n")
+            reset_url = f"{settings.il_sandbox_base_url}/operator/reset"
+            async with httpx.AsyncClient(timeout=10.0) as ac:
+                reset_resp = await ac.post(reset_url, headers=admin_headers)
+                if reset_resp.status_code != 200:
+                    sys.stderr.write(f"Pre-seed reset failed: {reset_resp.text}\n")
+                    return 1
+
+            # 2. Generate unrelated genuine healthy traffic before injection
+            sys.stderr.write("Generating pre-injection healthy checkout traffic...\n")
+            healthy_accepted = await submit_checkout(uuid4(), settings=settings)
+            await wait_for_order_fulfillment(
+                healthy_accepted.order_id, settings=settings, timeout_seconds=10.0
+            )
+            sys.stderr.write(
+                f"Healthy pre-injection order fulfilled: {healthy_accepted.order_id}\n"
+            )
+
+            # 3. Inject fault family via operator endpoint
+            sys.stderr.write(f"Injecting fault family '{args.family}' (seed={args.seed})...\n")
+            inject_url = f"{settings.il_sandbox_base_url}/operator/inject"
+            payload = {"family": args.family, "variant_seed": args.seed}
+            async with httpx.AsyncClient(timeout=10.0) as ac:
+                resp = await ac.post(inject_url, headers=admin_headers, json=payload)
+                if resp.status_code != 200:
+                    sys.stderr.write(f"Fault injection failed: {resp.status_code} {resp.text}\n")
+                    return 1
+                data = resp.json()
+                print(json.dumps(data, indent=2))
+                return 0
+
+        sys.exit(asyncio.run(run_seed()))
     elif args.command in future_cmds:
         sys.stderr.write(
             f"Command '{args.command}' belongs to a later task/phase and is not yet implemented.\n"

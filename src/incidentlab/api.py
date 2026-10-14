@@ -18,6 +18,8 @@ from incidentlab.executor import CheckoutError, submit_checkout, wait_for_order_
 from incidentlab.schemas import (
     DemoCheckoutRequest,
     DemoCheckoutResponse,
+    DemoFaultRequest,
+    DemoFaultResponse,
     DemoResetResponse,
     EventPage,
     EvidenceItem,
@@ -353,6 +355,103 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 data = resp.json()
                 return DemoResetResponse(
                     status=data.get("status", "reset"),
+                    revision=data["revision"],
+                )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error": {
+                        "code": "sandbox_unavailable",
+                        "message": f"Failed to communicate with sandbox: {exc}",
+                        "request_id": None,
+                        "retryable": True,
+                    }
+                },
+            ) from exc
+
+    @app.post(
+        "/api/v1/demo/fault",
+        response_model=DemoFaultResponse,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def demo_fault(payload: DemoFaultRequest, req: Request):
+        cfg = req.app.state.settings
+        # Refuse fault injection if a nonterminal incident exists
+        try:
+            with get_control_connection(cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, state
+                        FROM control.incidents
+                        WHERE state NOT IN (
+                            'verified_recovered', 'verification_failed', 'escalated',
+                            'rejected', 'cancelled', 'closed_unknown'
+                        )
+                        LIMIT 1
+                        """
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                "error": {
+                                    "code": "active_incident_exists",
+                                    "message": (
+                                        f"Cannot inject fault while incident {row[0]} "
+                                        f"is in active state {row[1]}"
+                                    ),
+                                    "request_id": None,
+                                    "retryable": False,
+                                }
+                            },
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": {
+                        "code": "database_unavailable",
+                        "message": f"Failed to query incidents: {exc}",
+                        "request_id": None,
+                        "retryable": True,
+                    }
+                },
+            ) from exc
+
+        # Forward fault injection to sandbox operator endpoint
+        inject_url = f"{cfg.il_sandbox_base_url}/operator/inject"
+        headers = {"Authorization": f"Bearer {cfg.il_sandbox_admin_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as ac:
+                resp = await ac.post(
+                    inject_url,
+                    headers=headers,
+                    json={"family": payload.family, "variant_seed": payload.variant_seed},
+                )
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail={
+                            "error": {
+                                "code": "sandbox_fault_injection_failed",
+                                "message": (
+                                    f"Sandbox inject returned status "
+                                    f"{resp.status_code}: {resp.text}"
+                                ),
+                                "request_id": None,
+                                "retryable": False,
+                            }
+                        },
+                    )
+                data = resp.json()
+                return DemoFaultResponse(
+                    status=data.get("status", "injected"),
+                    family=data.get("family", payload.family),
                     revision=data["revision"],
                 )
         except httpx.HTTPError as exc:

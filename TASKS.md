@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** P0 review-and-fix gate completed. Ready for P1 start.
+**Next action:** Execute IL-T05: connect read-only MCP and keyword retrieval.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container and schema migrations running and verified in `incidentlab-test`.
 
@@ -37,7 +37,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T01 | Qualified/pinned runtime and model probe | IL-05, IL-11, IL-13, IL-14 | P0 start approval | verified_complete | `artifacts/qualification.json`; 8 passed in `tests/test_model_contract.py` |
 | IL-T02 | Storage, roles, owner API boundary | IL-07, IL-10, IL-11, IL-14 | IL-T01 | verified_complete | `migrations/001_initial.sql` applied; 16 passed in `tests/test_api.py` and `tests/test_model_contract.py` |
 | IL-T03 | Actual healthy checkout and worker fulfillment | IL-01, IL-09, IL-14 | IL-T02 | verified_complete | 23 passed in `tests/`; smoke-checkout fulfilled in 0.33s |
-| IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | pending | Not run |
+| IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | verified_complete | `data/runbooks/inventory.md`; 26 passed in tests/; `seed` and failing `smoke-checkout` verified |
 | IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | pending | Not run |
 | IL-T06 | Bounded agent and durable proposal | IL-03, IL-05, IL-06, IL-07, IL-10, IL-11 | IL-T05 | pending | Not run |
 | IL-T07 | Bound approval and atomic claim | IL-07, IL-08, IL-11 | P1 accepted; P2 approved; IL-T06 | pending | Not run |
@@ -161,7 +161,25 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Token boundaries enforced: write, read, and admin tokens strictly validated with constant-time comparison.
     - Owner demo routes `/api/v1/demo/reset` and `/api/v1/demo/checkout` functional and reject resets during nonterminal incidents.
     - Two distinct smoke-checkout CLI runs succeeded with separate keys and logged structured entries with zero secret leaks.
-  - **Next action:** P0 Review-and-Fix gate subagent.
+  - **Next action:** P0 Review-and-Fix gate subagent (completed, verdict PASS in commit `04c7c7a`).
+
+- **IL-T04 (2026-10-14):**
+  - **Commit:** `feat: add observable inventory configuration fault`
+  - **Files:** `data/runbooks/inventory.md`, `src/incidentlab/api.py`, `src/incidentlab/cli.py`, `src/incidentlab/schemas.py`, `tests/test_sandbox_flow.py`.
+  - **Commands executed:**
+    - `uv run pytest tests/test_sandbox_flow.py -m 'not integration'` (exit 0, 1 passed, 9 deselected)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli seed --family inventory_config --seed 1` (exit 0, pre-injection checkout fulfilled, injected family `inventory_config`, revision 33)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (exit 1, failed with `[inventory_unavailable]`)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/` (exit 0, 26 passed)
+    - `uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Operational runbook `data/runbooks/inventory.md` created with required sections (`symptoms`, `diagnostics`, `repair`, `verification`, `escalation`), under 200 tokens each, and free of scenario gold labels.
+    - Fault injection `inventory_config` sets target `endpoint_key` to `inventory-legacy` under row lock and advances revision.
+    - Subsequent checkout fails with 503 `inventory_unavailable` without inserting an order into `sandbox.orders`.
+    - Diagnostics (`/diagnostics/config`, `/diagnostics/logs`, `/diagnostics/probe`) expose operational failure state without leaking the scenario label `inventory_config`.
+    - Owner demo endpoint `POST /api/v1/demo/fault` verifies owner bearer token, refuses mutation while an incident is nonterminal, and forwards to sandbox operator route.
+    - CLI `seed` subcommand generates pre-injection healthy traffic before applying fault to demonstrate log filtering.
+  - **Next action:** IL-T05 (connect read-only MCP and keyword retrieval).
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
 

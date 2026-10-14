@@ -188,3 +188,14 @@ class DemoCheckoutResponse(BaseSchema):
     order_id: UUID | None = None
     status: str
     error: str | None = None
+
+
+class DemoFaultRequest(BaseSchema):
+    family: Literal["inventory_config", "worker_paused", "upstream_maintenance"]
+    variant_seed: int = 1
+
+
+class DemoFaultResponse(BaseSchema):
+    status: str = "injected"
+    family: str
+    revision: int
