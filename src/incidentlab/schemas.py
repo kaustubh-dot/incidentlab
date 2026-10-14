@@ -115,6 +115,19 @@ class ApprovalView(BaseSchema):
     decided_at: datetime
 
 
+class ExecutionClaim(BaseSchema):
+    execution_key: UUID
+    proposal_id: UUID
+    incident_id: UUID
+    state: Literal["claimed", "dispatching", "applied", "precondition_failed", "unknown"]
+    payload_digest: str
+    expected_revision: int
+    payload: RepairPayload
+    claimed_at: datetime
+    dispatched_at: datetime | None = None
+    receipt: dict[str, Any] | None = None
+
+
 class RepairRequest(BaseSchema):
     execution_key: UUID
     incident_id: UUID

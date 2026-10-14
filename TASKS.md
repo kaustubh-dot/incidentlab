@@ -40,7 +40,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | verified_complete | `data/runbooks/inventory.md`; 26 passed in tests/; `seed` and failing `smoke-checkout` verified |
 | IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | verified_complete | 15 runbook chunks indexed; 5 passed in `tests/test_mcp_boundary.py` and `tests/test_retrieval.py` |
 | IL-T06 | Bounded agent and durable proposal | IL-03, IL-05, IL-06, IL-07, IL-10, IL-11 | IL-T05 | verified_complete | `tests/test_agent_contract.py` passed; live model test produced immutable proposal in `awaiting_approval` with zero sandbox effect |
-| IL-T07 | Bound approval and atomic claim | IL-07, IL-08, IL-11 | P1 accepted; P2 approved; IL-T06 | pending | Not run |
+| IL-T07 | Bound approval and atomic claim | IL-07, IL-08, IL-11 | P1 accepted; P2 approved; IL-T06 | verified_complete | `tests/test_approval.py` passed; 9 focused tests, duplicate idempotency, reject 0 claims, stale revision rejected |
 | IL-T08 | Repair, receipt and functional verification | IL-08, IL-09, IL-11 | IL-T07 | pending | Not run |
 | IL-T09 | Thin UI and first complete live E2E | IL-01, IL-03, IL-07, IL-08, IL-09, IL-10, IL-14 | IL-T08 | pending | Not run |
 | IL-T10 | Worker recovery and maintenance escalation | IL-02, IL-03, IL-08, IL-09 | P2 accepted; P3 approved; IL-T09 | pending | Not run |
@@ -214,7 +214,25 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Incident transitions to `awaiting_approval` without applying any target mutation (zero repair effect during investigation, target revision unchanged).
     - Database isolation preserved: control role never queries sandbox schema directly; evidence obtained exclusively through MCP.
     - Autouse integration test fixture ensures no lingering active incidents block subsequent runs.
-  - **Next action:** Phase P1 Review-and-Fix gate subagent.
+  - **Next action:** Phase P1 Review-and-Fix gate subagent (passed). Next action: IL-T07 (bound owner approval and one execution claim).
+
+- **IL-T07 (2026-10-14):**
+  - **Commit:** `feat: bind owner approval to immutable repair claims`
+  - **Files:** `src/incidentlab/approvals.py`, `src/incidentlab/schemas.py`, `src/incidentlab/api.py`, `tests/test_approval.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_approval.py -v` (exit 0, 9 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 43 passed)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (exit 0, fulfilled in 0.33s)
+  - **Observed facts:**
+    - Owner decision transaction runs under PostgreSQL row-level locks on incident and proposal records.
+    - Proposal constraints strictly validated: state must be `awaiting_approval`, proposal not expired, proposal not cancelled, target revision match, and stored payload digest match recomputed canonical SHA-256 digest.
+    - Submitting `approve` transitions incident state to `approved` and records `approval_recorded` event.
+    - Identical duplicate decisions return idempotent readback; conflicting decisions (approve vs reject) raise 409 conflict error.
+    - Decision `reject` sets state to `rejected` and produces exactly zero execution claims.
+    - Execution claims enforce exactly one claim per proposal (`UNIQUE(proposal_id)` in `control.executions`). Precheck queries current sandbox target revision before dispatching.
+    - Async HTTP I/O (`check_target_revision`) performed outside database transaction to prevent `idle in transaction` lock contention.
+  - **Next action:** IL-T08 (execute the finite repair and independently verify checkout).
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.

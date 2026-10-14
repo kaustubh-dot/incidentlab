@@ -13,12 +13,15 @@ import psycopg.errors
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
+from incidentlab.approvals import ApprovalError, claim_execution, decide_proposal
 from incidentlab.config import Settings
 from incidentlab.db import get_control_connection
 from incidentlab.events import read_events, record_event
 from incidentlab.executor import CheckoutError, submit_checkout, wait_for_order_fulfillment
 from incidentlab.graph import run_investigation
 from incidentlab.schemas import (
+    ApprovalDecision,
+    ApprovalView,
     DemoCheckoutRequest,
     DemoCheckoutResponse,
     DemoFaultRequest,
@@ -407,6 +410,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             ) from exc
 
+    @app.post(
+        "/api/v1/incidents/{incident_id}/decision",
+        response_model=ApprovalView,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def submit_decision(
+        incident_id: UUID,
+        decision_payload: ApprovalDecision,
+        req: Request,
+    ) -> ApprovalView:
+        cfg = req.app.state.settings
+        try:
+            approval_view = await decide_proposal(
+                incident_id=incident_id,
+                owner_id="owner",
+                decision=decision_payload,
+                settings=cfg,
+            )
+            if decision_payload.decision == "approve":
+                await claim_execution(
+                    incident_id=incident_id,
+                    proposal_id=decision_payload.proposal_id,
+                    settings=cfg,
+                )
+            return approval_view
+        except ApprovalError as err:
+            raise HTTPException(
+                status_code=err.status_code,
+                detail={
+                    "error": {
+                        "code": err.code,
+                        "message": err.message,
+                        "request_id": None,
+                        "retryable": False,
+                    }
+                },
+            ) from err
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": {
+                        "code": "approval_failed",
+                        "message": f"Failed to record approval decision: {exc}",
+                        "request_id": None,
+                        "retryable": False,
+                    }
+                },
+            ) from exc
+
     # --- Owner Demo Controls ---
 
     @app.post(
@@ -426,7 +481,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         FROM control.incidents
                         WHERE state NOT IN (
                             'verified_recovered', 'verification_failed', 'escalated',
-                            'rejected', 'cancelled', 'closed_unknown'
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
                         )
                         LIMIT 1
                         """
@@ -517,7 +572,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         FROM control.incidents
                         WHERE state NOT IN (
                             'verified_recovered', 'verification_failed', 'escalated',
-                            'rejected', 'cancelled', 'closed_unknown'
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
                         )
                         LIMIT 1
                         """
