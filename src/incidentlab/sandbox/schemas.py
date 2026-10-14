@@ -20,7 +20,7 @@ class CheckoutRequest(BaseSchema):
 class CheckoutAccepted(BaseSchema):
     request_id: UUID
     order_id: UUID
-    status: Literal["pending"] = "pending"
+    status: Literal["pending", "fulfilled"] = "pending"
 
 
 class OrderView(BaseSchema):

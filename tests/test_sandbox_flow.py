@@ -301,70 +301,73 @@ async def test_inventory_config_fault_injection(sandbox_client, live_settings):
     healthy_created = await sandbox_client.checkout(request_key=healthy_key)
     assert healthy_created.status == "pending"
 
-    # Inject inventory_config fault via operator endpoint
-    url = f"{live_settings.il_sandbox_base_url}/operator/inject"
-    headers = {"Authorization": f"Bearer {live_settings.il_sandbox_admin_token}"}
-    async with httpx.AsyncClient(timeout=10.0) as ac:
-        inject_resp = await ac.post(
-            url,
-            headers=headers,
-            json={"family": "inventory_config", "variant_seed": 1},
-        )
-        assert inject_resp.status_code == 200
-        inject_data = inject_resp.json()
-        assert inject_data["status"] == "injected"
-        assert inject_data["family"] == "inventory_config"
+    try:
+        # Inject inventory_config fault via operator endpoint
+        url = f"{live_settings.il_sandbox_base_url}/operator/inject"
+        headers = {"Authorization": f"Bearer {live_settings.il_sandbox_admin_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            inject_resp = await ac.post(
+                url,
+                headers=headers,
+                json={"family": "inventory_config", "variant_seed": 1},
+            )
+            assert inject_resp.status_code == 200
+            inject_data = inject_resp.json()
+            assert inject_data["status"] == "injected"
+            assert inject_data["family"] == "inventory_config"
 
-    # Verify checkout fails with 503 inventory_unavailable
-    failing_key = uuid4()
-    write_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_write_token}"}
-    async with httpx.AsyncClient(timeout=10.0) as ac:
-        checkout_resp = await ac.post(
-            f"{live_settings.il_sandbox_base_url}/checkout",
-            headers=write_headers,
-            json={"request_key": str(failing_key), "sku": "SKU-1", "quantity": 1},
-        )
-        assert checkout_resp.status_code == 503
-        err_body = checkout_resp.json()
-        assert "error" in err_body
-        failed_err = err_body["error"]
-        assert failed_err["code"] == "inventory_unavailable"
-        assert failed_err["request_id"] is not None
+        # Verify checkout fails with 503 inventory_unavailable
+        failing_key = uuid4()
+        write_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_write_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            checkout_resp = await ac.post(
+                f"{live_settings.il_sandbox_base_url}/checkout",
+                headers=write_headers,
+                json={"request_key": str(failing_key), "sku": "SKU-1", "quantity": 1},
+            )
+            assert checkout_resp.status_code == 503
+            err_body = checkout_resp.json()
+            assert "error" in err_body
+            failed_err = err_body["error"]
+            assert failed_err["code"] == "inventory_unavailable"
+            assert failed_err["request_id"] is not None
 
-        failed_request_id = failed_err["request_id"]
+            failed_request_id = failed_err["request_id"]
 
-    # Verify diagnostic JSON excludes hidden scenario identifiers
-    read_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_read_token}"}
-    async with httpx.AsyncClient(timeout=10.0) as ac:
-        config_resp = await ac.get(
-            f"{live_settings.il_sandbox_base_url}/diagnostics/config",
-            headers=read_headers,
-        )
-        assert config_resp.status_code == 200
-        config_data = config_resp.json()
-        assert config_data["endpoint_key"] == "inventory-legacy"
-        assert "inventory_config" not in str(config_data)
+        # Verify diagnostic JSON excludes hidden scenario identifiers
+        read_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_read_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            config_resp = await ac.get(
+                f"{live_settings.il_sandbox_base_url}/diagnostics/config",
+                headers=read_headers,
+            )
+            assert config_resp.status_code == 200
+            config_data = config_resp.json()
+            assert config_data["endpoint_key"] == "inventory-legacy"
+            assert "inventory_config" not in str(config_data)
 
-        # Logs should show failure for the specific request_id
-        logs_resp = await ac.get(
-            f"{live_settings.il_sandbox_base_url}/diagnostics/logs?request_id={failed_request_id}",
-            headers=read_headers,
-        )
-        assert logs_resp.status_code == 200
-        logs_data = logs_resp.json()
-        assert len(logs_data) >= 1
-        assert logs_data[0]["event_kind"] == "inventory_failed"
-        assert "inventory_config" not in str(logs_data)
+            # Logs should show failure for the specific request_id
+            logs_resp = await ac.get(
+                f"{live_settings.il_sandbox_base_url}/diagnostics/logs?request_id={failed_request_id}",
+                headers=read_headers,
+            )
+            assert logs_resp.status_code == 200
+            logs_data = logs_resp.json()
+            assert len(logs_data) >= 1
+            assert logs_data[0]["event_kind"] == "inventory_failed"
+            assert "inventory_config" not in str(logs_data)
 
-        # Probe should report inventory_status 503 and unreachable
-        probe_resp = await ac.get(
-            f"{live_settings.il_sandbox_base_url}/diagnostics/probe",
-            headers=read_headers,
-        )
-        assert probe_resp.status_code == 200
-        probe_data = probe_resp.json()
-        assert probe_data["inventory_status"] == 503
-        assert probe_data["inventory_reachable"] is False
+            # Probe should report inventory_status 503 and unreachable
+            probe_resp = await ac.get(
+                f"{live_settings.il_sandbox_base_url}/diagnostics/probe",
+                headers=read_headers,
+            )
+            assert probe_resp.status_code == 200
+            probe_data = probe_resp.json()
+            assert probe_data["inventory_status"] == 503
+            assert probe_data["inventory_reachable"] is False
+    finally:
+        await sandbox_client.reset()
 
 
 @pytest.mark.integration
@@ -381,12 +384,15 @@ async def test_owner_api_demo_fault(live_settings):
         # Reset first
         await ac.post("/api/v1/demo/reset", headers=headers)
 
-        # Inject fault
-        fault_resp = await ac.post(
-            "/api/v1/demo/fault",
-            headers=headers,
-            json={"family": "inventory_config", "variant_seed": 1},
-        )
-        assert fault_resp.status_code == 200
-        assert fault_resp.json()["status"] == "injected"
-        assert fault_resp.json()["family"] == "inventory_config"
+        try:
+            # Inject fault
+            fault_resp = await ac.post(
+                "/api/v1/demo/fault",
+                headers=headers,
+                json={"family": "inventory_config", "variant_seed": 1},
+            )
+            assert fault_resp.status_code == 200
+            assert fault_resp.json()["status"] == "injected"
+            assert fault_resp.json()["family"] == "inventory_config"
+        finally:
+            await ac.post("/api/v1/demo/reset", headers=headers)
