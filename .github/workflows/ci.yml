@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - implementation/build
+  pull_request:
+    branches:
+      - main
+      - implementation/build
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-checks:
+    name: Offline Integrity & Quality Checks
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: incidentlab
+          POSTGRES_USER: incidentlab_migrator
+          POSTGRES_PASSWORD: test_ci_migration_password_123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U incidentlab_migrator -d incidentlab"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      IL_BIND_HOST: "127.0.0.1"
+      IL_PORT: "8000"
+      IL_MIGRATION_DATABASE_URL: "postgresql://incidentlab_migrator:test_ci_migration_password_123@127.0.0.1:5432/incidentlab"
+      IL_CONTROL_DB_PASSWORD: "ci_control_password_123"
+      IL_SANDBOX_DB_PASSWORD: "ci_sandbox_password_123"
+      IL_DATABASE_URL: "postgresql://incidentlab_control:ci_control_password_123@127.0.0.1:5432/incidentlab"
+      IL_SANDBOX_DATABASE_URL: "postgresql://incidentlab_sandbox:ci_sandbox_password_123@127.0.0.1:5432/incidentlab"
+      IL_OWNER_TOKEN: "0000000000000000000000000000000000000000000000000000000000000001"
+      IL_SANDBOX_READ_TOKEN: "0000000000000000000000000000000000000000000000000000000000000002"
+      IL_SANDBOX_WRITE_TOKEN: "0000000000000000000000000000000000000000000000000000000000000003"
+      IL_SANDBOX_ADMIN_TOKEN: "0000000000000000000000000000000000000000000000000000000000000004"
+      IL_SANDBOX_PORT: "8001"
+      IL_SANDBOX_BASE_URL: "http://127.0.0.1:8001"
+      IL_OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+      IL_MODEL: "qwen3:8b"
+      IL_LOG_LEVEL: "INFO"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Ruff Lint & Format Check
+        run: uv run ruff check .
+
+      - name: Frontend Dependencies & TypeScript Typecheck
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run typecheck
+
+      - name: Frontend Production Build
+        run: npm --prefix frontend run build
+
+      - name: Install Python Dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run Database Migrations
+        run: |
+          uv run python -m incidentlab.cli migrate
+          uv run python -m incidentlab.cli index-runbooks
+
+      - name: Start Sandbox Service in Background
+        run: |
+          uv run uvicorn incidentlab.sandbox.api:app --host 127.0.0.1 --port 8001 &
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:8001/healthz | grep -q "ok"; then
+              echo "Sandbox service is ready."
+              break
+            fi
+            echo "Waiting for sandbox service..."
+            sleep 1
+          done
+
+      - name: Run Essential Offline Test Suite
+        run: uv run pytest -m 'not live_model'

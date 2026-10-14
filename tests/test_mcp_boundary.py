@@ -81,3 +81,17 @@ async def test_mcp_stdio_client_live_session(live_settings):
                 name="arbitrary_bash",  # type: ignore[arg-type]
                 args={},
             )
+
+
+def test_mcp_tools_prevent_arbitrary_path_or_command_selection():
+    """Verify tool parameter schemas cannot select arbitrary URLs, paths, or commands."""
+    from incidentlab.mcp_server import list_registered_tools
+
+    tools = list_registered_tools()
+    for name, tool in tools.items():
+        schema = tool.parameters if hasattr(tool, "parameters") else {}
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        forbidden = {"url", "path", "file", "cmd", "command", "exec", "script", "host"}
+        assert not (forbidden & set(props.keys())), f"Tool {name} has forbidden parameters"
+
+
