@@ -10,9 +10,9 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T01: inspect runtime environment (Python, Docker, GPU/driver, Ollama), pin minimum runtime/dev dependencies in `pyproject.toml` / `uv.lock`, implement config/model/CLI qualify contracts, run model contract tests, and record qualification facts.
+**Next action:** Execute IL-T03: complete healthy fake checkout, local inventory dependency route, sandbox worker loop fulfilling orders to `fulfilled`, owner demo checkout route, and CLI `smoke-checkout`.
 
-**Current blockers:** Lab capability qualification in progress. Measuring actual capabilities on the authorized host.
+**Current blockers:** None. Docker and Compose installed; PostgreSQL container and schema migrations running and verified in `incidentlab-test`.
 
 **Execution constraint:** Follow `AGENTS.md` on simplicity during coding. Stop once mapped acceptance and minimum verification pass. Do not add a framework, service, test expansion, repeated review, or optimization without an unmet active requirement or observed issue.
 
@@ -35,7 +35,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | Task | Deliverable | PRD IDs | Dependencies | Status | Evidence |
 |---|---|---|---|---|---|
 | IL-T01 | Qualified/pinned runtime and model probe | IL-05, IL-11, IL-13, IL-14 | P0 start approval | verified_complete | `artifacts/qualification.json`; 8 passed in `tests/test_model_contract.py` |
-| IL-T02 | Storage, roles, owner API boundary | IL-07, IL-10, IL-11, IL-14 | IL-T01 | pending | Not run |
+| IL-T02 | Storage, roles, owner API boundary | IL-07, IL-10, IL-11, IL-14 | IL-T01 | verified_complete | `migrations/001_initial.sql` applied; 16 passed in `tests/test_api.py` and `tests/test_model_contract.py` |
 | IL-T03 | Actual healthy checkout and worker fulfillment | IL-01, IL-09, IL-14 | IL-T02 | pending | Not run |
 | IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | pending | Not run |
 | IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | pending | Not run |
@@ -125,7 +125,22 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
       - Docker / Docker Compose is not installed on the host (`Command not found: docker`).
       - Passwordless sudo is not enabled (`sudo -n true` requires password).
       - GPU `nvidia-smi` failed with driver/library mismatch (NVRM 595.91.07 vs NVML 595.99.02).
-  - **Next action:** IL-T02 (implement storage, roles, and owner API boundary). Note: Running Compose-managed PostgreSQL services or Docker containers requires Docker to be installed on the host.
+  - **Next action:** IL-T02 completed. Next action: IL-T03 (healthy fake checkout and worker fulfillment).
+
+- **IL-T02 (2026-10-14):**
+  - **Commit:** `feat: add durable storage and owner API boundary`
+  - **Files:** `migrations/001_initial.sql`, `src/incidentlab/schemas.py`, `src/incidentlab/db.py`, `src/incidentlab/events.py`, `src/incidentlab/api.py`, `src/incidentlab/cli.py`, `tests/conftest.py`, `tests/test_api.py`, `Dockerfile`.
+  - **Commands executed:**
+    - `docker compose -p incidentlab-test up -d postgres` (exit 0, PostgreSQL 17 active on port 5432)
+    - `incidentlab.cli migrate` (exit 0, created schemas control, sandbox, checkpoints; set role grants)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_api.py tests/test_model_contract.py` (exit 0, 16 passed)
+    - `uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Control and sandbox roles isolated: control role has zero privileges on sandbox tables; sandbox role has zero privileges on control tables.
+    - Single active incident constraint verified: unique partial index prevents second active incident.
+    - Audit event log verified: strictly monotonic seq, correct SHA-256 prev_hash chain, sensitive key redaction.
+    - API authentication boundary verified: 401 on missing/invalid bearer token, 200 on valid token.
+  - **Next action:** IL-T03 (healthy fake checkout and worker fulfillment).
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
 

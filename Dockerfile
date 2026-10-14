@@ -3,13 +3,15 @@ FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/home/incidentlab/.local/bin:$PATH"
+    PATH="/app/.venv/bin:/home/incidentlab/.local/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1000 -s /bin/bash incidentlab
+RUN useradd -m -u 1000 -s /bin/bash incidentlab \
+    && mkdir -p /app \
+    && chown -R incidentlab:incidentlab /app
 
 USER incidentlab
 WORKDIR /app

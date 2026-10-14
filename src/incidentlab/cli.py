@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -266,8 +267,10 @@ def main():
     )
     qualify_parser.add_argument("--output", type=Path, default=Path("artifacts/qualification.json"))
 
-    # Stubs for subsequent tasks/phases
-    subparsers.add_parser("migrate", help="Run database migrations (P0)")
+    # Stubs and commands for subsequent tasks/phases
+    migrate_parser = subparsers.add_parser("migrate", help="Run database migrations (P0)")
+    migrate_parser.add_argument("--dsn", type=str, default=None, help="Migration database DSN")
+
     subparsers.add_parser("smoke-checkout", help="Run healthy checkout check (P0)")
     subparsers.add_parser("index-runbooks", help="Index versioned runbooks (P1)")
     subparsers.add_parser("seed", help="Seed a fault scenario (P1)")
@@ -276,12 +279,33 @@ def main():
 
     args = parser.parse_args()
 
-    future_cmds = (
-        "migrate", "smoke-checkout", "index-runbooks", "seed", "smoke-demo", "resolve-unknown"
-    )
+    future_cmds = ("smoke-checkout", "index-runbooks", "seed", "smoke-demo", "resolve-unknown")
     if args.command == "qualify":
         result = qualify_runtime(args.output)
         print(json.dumps(result, indent=2))
+    elif args.command == "migrate":
+        from incidentlab.db import run_migrations
+
+        migration_dsn = args.dsn or os.environ.get("IL_MIGRATION_DATABASE_URL")
+        if not migration_dsn:
+            sys.stderr.write("Error: IL_MIGRATION_DATABASE_URL environment variable is required.\n")
+            sys.exit(1)
+
+        control_pw = os.environ.get("IL_CONTROL_DB_PASSWORD")
+        sandbox_pw = os.environ.get("IL_SANDBOX_DB_PASSWORD")
+
+        try:
+            sys.stderr.write("Waiting for PostgreSQL database readiness...\n")
+            applied = run_migrations(
+                migration_dsn=migration_dsn,
+                control_password=control_pw,
+                sandbox_password=sandbox_pw,
+            )
+            sys.stderr.write(f"Migrations applied successfully: {applied}\n")
+            print(json.dumps({"status": "ok", "applied": applied}, indent=2))
+        except Exception as exc:
+            sys.stderr.write(f"Migration failed: {exc}\n")
+            sys.exit(1)
     elif args.command in future_cmds:
         sys.stderr.write(
             f"Command '{args.command}' belongs to a later task/phase and is not yet implemented.\n"
