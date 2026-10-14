@@ -159,10 +159,10 @@ async def execute_claim(
     if settings is None:
         settings = Settings.from_env()
 
-    # 1. Action allowlist check (for IL-T08 only set_inventory_endpoint is permitted)
-    if claim.payload.action not in ("set_inventory_endpoint",):
+    # 1. Action allowlist check: exactly the two allowed actions
+    if claim.payload.action not in ("set_inventory_endpoint", "resume_order_worker"):
         raise ValueError(
-            f"Action '{claim.payload.action}' is not supported in this phase"
+            f"Action '{claim.payload.action}' is not supported"
         )
 
     # 2. Check cancellation and state under control DB lock

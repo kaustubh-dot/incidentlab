@@ -456,6 +456,7 @@ def main():
             CheckoutError,
             execute_claim,
             submit_checkout,
+            wait_for_order_fulfillment,
         )
         from incidentlab.graph import run_investigation
         from incidentlab.schemas import ApprovalDecision
@@ -503,22 +504,45 @@ def main():
                     sys.stderr.write(f"Inject failed: {inj_resp.text}\n")
                     return 1
 
-            # 3. Trigger failing checkout to observe real failure
-            sys.stderr.write("3. Probing checkout to observe genuine failure...\n")
+            # 3. Trigger failing checkout or worker stall to observe real failure
             failing_req_id = uuid4()
-            try:
-                await submit_checkout(uuid4(), settings=settings)
-                sys.stderr.write("ERROR: Checkout unexpectedly succeeded!\n")
-                return 1
-            except CheckoutError as chk_err:
-                sys.stderr.write(
-                    f"Observed checkout failure: {chk_err.code} - {chk_err.message}\n"
+            failing_order_id = None
+            if args.family == "worker_paused":
+                sys.stderr.write("3. Probing checkout and worker fulfillment...\n")
+                accepted = await submit_checkout(uuid4(), settings=settings)
+                failing_req_id = accepted.request_id
+                failing_order_id = accepted.order_id
+                order_view = await wait_for_order_fulfillment(
+                    accepted.order_id, settings=settings, timeout_seconds=1.5
                 )
-                if chk_err.request_id:
-                    try:
-                        failing_req_id = UUID(chk_err.request_id)
-                    except Exception:
-                        pass
+                if order_view.status == "fulfilled":
+                    sys.stderr.write(
+                        "ERROR: Worker was expected to be paused, but order was fulfilled!\n"
+                    )
+                    return 1
+                sys.stderr.write(
+                    f"Observed worker stall: order {failing_order_id} "
+                    f"remains in status '{order_view.status}'\n"
+                )
+                symptom_text = (
+                    "Checkout accepted order but fulfillment timed out: order remains pending"
+                )
+            else:
+                sys.stderr.write("3. Probing checkout to observe genuine failure...\n")
+                try:
+                    await submit_checkout(uuid4(), settings=settings)
+                    sys.stderr.write("ERROR: Checkout unexpectedly succeeded!\n")
+                    return 1
+                except CheckoutError as chk_err:
+                    sys.stderr.write(
+                        f"Observed checkout failure: {chk_err.code} - {chk_err.message}\n"
+                    )
+                    if chk_err.request_id:
+                        try:
+                            failing_req_id = UUID(chk_err.request_id)
+                        except Exception:
+                            pass
+                    symptom_text = f"Checkout failed: {chk_err.message}"
 
             # 4. Start incident and run investigation
             sys.stderr.write("4. Launching bounded agent investigation...\n")
@@ -527,13 +551,14 @@ def main():
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO control.incidents (id, state, symptom, request_id)
-                        VALUES (%s, 'investigating', %s, %s)
+                        INSERT INTO control.incidents (id, state, symptom, request_id, order_id)
+                        VALUES (%s, 'investigating', %s, %s, %s)
                         """,
                         (
                             incident_id,
-                            "Checkout failed: Inventory service returned HTTP 503",
+                            symptom_text,
                             failing_req_id,
+                            failing_order_id,
                         ),
                     )
                 conn.commit()
@@ -544,6 +569,22 @@ def main():
             sys.stderr.write(
                 f"Investigation complete. Phase: {investigation_state.get('phase')}\n"
             )
+
+            # Check if investigation led to escalation (e.g. upstream maintenance)
+            if investigation_state.get("phase") == "escalated":
+                diag = investigation_state.get("diagnosis", {})
+                print("\n================== INCIDENT ESCALATED ==================")
+                print(f"Incident ID:      {incident_id}")
+                print("State:            escalated")
+                print(f"Summary:          {diag.get('summary')}")
+                print(f"Uncertainty:      {diag.get('uncertainty')}")
+                print("Repair:           None (External upstream condition - zero repair receipts)")
+                print("========================================================\n")
+                print(
+                    f"SUCCESS: Incident {incident_id} escalated without repair action "
+                    "(zero repair receipts)."
+                )
+                return 0
 
             # 5. Read proposed action
             with get_control_connection(settings) as conn:
@@ -571,7 +612,10 @@ def main():
             print(f"Incident ID:      {incident_id}")
             print(f"Proposal ID:      {prop_id}")
             print(f"Action:           {payload.get('action')}")
-            print(f"Endpoint Key:     {payload.get('endpoint_key')}")
+            if "endpoint_key" in payload:
+                print(f"Endpoint Key:     {payload.get('endpoint_key')}")
+            if "worker_id" in payload:
+                print(f"Worker ID:        {payload.get('worker_id')}")
             print(f"Target Revision:  {target_rev}")
             print(f"Payload Digest:   {digest}")
             print(f"Expires At:       {expires_at}")

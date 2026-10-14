@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -20,6 +21,7 @@ from incidentlab.sandbox import service as sandbox_service
 from incidentlab.schemas import (
     ApprovalDecision,
     ExecutionClaim,
+    ResumeOrderWorkerPayload,
     SetInventoryEndpointPayload,
 )
 from incidentlab.verifier import verify_checkout
@@ -37,14 +39,24 @@ def _seed_incident_proposal_claim(
     revision: int,
     action: str = "set_inventory_endpoint",
     endpoint_key: str = "inventory-local",
+    worker_id: str = "checkout-worker",
     expires_in_seconds: int = 600,
     cancel_requested: bool = False,
+    payload_override: Any = None,
 ) -> ExecutionClaim:
     """Helper to seed an approved incident, proposal, and claim."""
-    payload = SetInventoryEndpointPayload(
-        action=action,
-        endpoint_key=endpoint_key,
-    )
+    if payload_override is not None:
+        payload = payload_override
+    elif action == "resume_order_worker":
+        payload = ResumeOrderWorkerPayload(
+            action="resume_order_worker",
+            worker_id=worker_id,
+        )
+    else:
+        payload = SetInventoryEndpointPayload(
+            action=action,
+            endpoint_key=endpoint_key,
+        )
     digest = compute_payload_digest(payload)
     proposal_id = uuid4()
     execution_key = uuid4()
@@ -481,3 +493,69 @@ async def test_reconcile_api_endpoint(live_settings):
         assert data["execution_key"] == str(claim.execution_key)
         assert data["reconciled"] is True
         assert data["receipt"]["result"] == "applied"
+
+
+@pytest.mark.asyncio
+async def test_execute_claim_resumes_worker_and_fulfills_order(live_settings):
+    """Executing resume_order_worker resumes background worker and fulfills checkout order."""
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+        sandbox_service.reset_sandbox(s_conn)
+        sandbox_service.inject_fault(s_conn, family="worker_paused", variant_seed=1)
+        state_before = sandbox_service.get_target_state(s_conn)
+        rev_before = state_before["revision"]
+        assert state_before["worker_running"] is False
+
+    incident_id = uuid4()
+    with get_control_connection(live_settings) as c_conn:
+        claim = _seed_incident_proposal_claim(
+            c_conn,
+            incident_id,
+            revision=rev_before,
+            action="resume_order_worker",
+            worker_id="checkout-worker",
+        )
+
+    receipt = await execute_claim(claim, settings=live_settings)
+    assert receipt.result == "applied"
+    assert receipt.before_revision == rev_before
+    assert receipt.after_revision == rev_before + 1
+
+    # Verify sandbox worker state updated
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+        state_after = sandbox_service.get_target_state(s_conn)
+        assert state_after["worker_running"] is True
+        assert state_after["revision"] == rev_before + 1
+
+    # Run functional verification - must achieve a newly fulfilled order
+    verif = await verify_checkout(incident_id, uuid4(), settings=live_settings)
+    assert verif.verdict == "pass"
+    assert verif.observed_status == "fulfilled"
+    assert verif.order_id is not None
+
+    with get_control_connection(live_settings) as c_conn:
+        with c_conn.cursor() as cur:
+            cur.execute("SELECT state FROM control.incidents WHERE id = %s", (incident_id,))
+            assert cur.fetchone()[0] == "verified_recovered"
+
+
+@pytest.mark.asyncio
+async def test_action_allowlist_enforced(live_settings):
+    """Actions outside ('set_inventory_endpoint', 'resume_order_worker') are rejected."""
+    class FakeUnsupportedPayload:
+        action = "restart_system"
+        def model_dump(self, mode="json"):
+            return {"action": "restart_system"}
+
+    claim = ExecutionClaim.model_construct(
+        execution_key=uuid4(),
+        proposal_id=uuid4(),
+        incident_id=uuid4(),
+        state="claimed",
+        payload_digest="dummy",
+        expected_revision=1,
+        payload=FakeUnsupportedPayload(),
+        claimed_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(ValueError, match="Action 'restart_system' is not supported"):
+        await execute_claim(claim, settings=live_settings)

@@ -35,6 +35,7 @@ export default function App() {
     "Checkout failed: Inventory service returned HTTP 503"
   );
   const [requestId, setRequestId] = useState<string>("");
+  const [orderId, setOrderId] = useState<string>("");
   const [incident, setIncident] = useState<IncidentView | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -174,11 +175,16 @@ export default function App() {
         );
       } else {
         setDemoStatus(
-          `Checkout failed as expected: status=${res.status}, error=${res.error}`
+          `Checkout failed as expected: status=${res.status}${res.error ? `, error=${res.error}` : ""}`
         );
         setRequestId(res.request_id);
+        if (res.order_id) {
+          setOrderId(res.order_id);
+        }
         if (res.error) {
           setSymptom(`Checkout failed: ${res.error}`);
+        } else if (res.status === "pending") {
+          setSymptom("Checkout accepted order but fulfillment timed out: order remains pending");
         }
       }
     } catch (err: unknown) {
@@ -206,6 +212,7 @@ export default function App() {
       const newInc = await startIncident(token, {
         symptom: symptom.trim(),
         request_id: reqIdToUse,
+        order_id: orderId.trim() || undefined,
       });
       setIncident(newInc);
       setRequestId(reqIdToUse);
@@ -356,7 +363,17 @@ export default function App() {
             <select
               id="fault-family-select"
               value={selectedFamily}
-              onChange={(e) => setSelectedFamily(e.target.value)}
+              onChange={(e) => {
+                const fam = e.target.value;
+                setSelectedFamily(fam);
+                if (fam === "worker_paused") {
+                  setSymptom("Checkout accepted order but fulfillment timed out: order remains pending");
+                } else if (fam === "upstream_maintenance") {
+                  setSymptom("Checkout failed: Upstream inventory is currently undergoing maintenance");
+                } else {
+                  setSymptom("Checkout failed: Inventory service returned HTTP 503");
+                }
+              }}
               disabled={demoLoading}
             >
               <option value="inventory_config">Wrong Inventory Configuration (P1/P2)</option>
@@ -421,6 +438,18 @@ export default function App() {
                 value={requestId}
                 onChange={(e) => setRequestId(e.target.value)}
                 placeholder="e.g. 550e8400-e29b-41d4-a716-446655440000"
+                disabled={actionLoading || Boolean(incident && !isTerminal(incident.state))}
+              />
+            </div>
+
+            <div className="form-group" style={{ marginTop: "0.5rem" }}>
+              <label htmlFor="order-id-input">Affected Order ID (Optional UUID)</label>
+              <input
+                id="order-id-input"
+                type="text"
+                value={orderId}
+                onChange={(e) => setOrderId(e.target.value)}
+                placeholder="e.g. 550e8400-e29b-41d4-a716-446655440001"
                 disabled={actionLoading || Boolean(incident && !isTerminal(incident.state))}
               />
             </div>
@@ -669,6 +698,41 @@ export default function App() {
                       <div className="kv-val">
                         {String(
                           (incident.outcome.verification as Record<string, unknown>).observed_status
+                        )}
+                      </div>
+                    </div>
+                  )}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {incident && incident.state === "escalated" && (
+          <section className="panel full-width" style={{ borderColor: "var(--accent-amber)" }}>
+            <div className="alert alert-warning">
+              <div style={{ width: "100%" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong>Incident Escalated (Unsupported Case / Upstream Condition)</strong>
+                  <span className="badge badge-amber">ESCALATED</span>
+                </div>
+                <p style={{ marginTop: "0.25rem" }}>
+                  The agent investigation diagnosed an external or non-repairable condition (e.g. upstream maintenance).
+                  Per safety rules, no repair was proposed and zero execution claims or receipts were created.
+                </p>
+                {incident.outcome &&
+                  typeof incident.outcome === "object" &&
+                  "diagnosis" in incident.outcome && (
+                    <div className="kv-table" style={{ marginTop: "0.5rem" }}>
+                      <div className="kv-key">Diagnosis Summary</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.diagnosis as Record<string, unknown>).summary || "Escalated by agent"
+                        )}
+                      </div>
+                      <div className="kv-key">Uncertainty / Notes</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.diagnosis as Record<string, unknown>).uncertainty || "None"
                         )}
                       </div>
                     </div>

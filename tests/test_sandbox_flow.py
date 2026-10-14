@@ -396,3 +396,92 @@ async def test_owner_api_demo_fault(live_settings):
             assert fault_resp.json()["family"] == "inventory_config"
         finally:
             await ac.post("/api/v1/demo/reset", headers=headers)
+
+
+@pytest.mark.integration
+async def test_worker_paused_fault_injection(sandbox_client, live_settings):
+    """Verify worker_paused fault pauses fulfillment while checkout still accepts orders."""
+    await sandbox_client.reset()
+    try:
+        # Inject worker_paused fault
+        url = f"{live_settings.il_sandbox_base_url}/operator/inject"
+        headers = {"Authorization": f"Bearer {live_settings.il_sandbox_admin_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            inject_resp = await ac.post(
+                url,
+                headers=headers,
+                json={"family": "worker_paused", "variant_seed": 1},
+            )
+            assert inject_resp.status_code == 200
+            assert inject_resp.json()["family"] == "worker_paused"
+
+        # Checkout still accepts order and sets status pending
+        key = uuid4()
+        accepted = await sandbox_client.checkout(request_key=key)
+        assert accepted.status == "pending"
+
+        # Wait briefly to confirm order remains pending (not fulfilled)
+        await asyncio.sleep(1.0)
+        order = await sandbox_client.get_order(accepted.order_id)
+        assert order.status == "pending"
+        assert order.fulfilled_at is None
+
+        # Verify diagnostics config shows worker_running=False without leaking scenario gold
+        read_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_read_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            config_resp = await ac.get(
+                f"{live_settings.il_sandbox_base_url}/diagnostics/config",
+                headers=read_headers,
+            )
+            assert config_resp.status_code == 200
+            config_data = config_resp.json()
+            assert config_data["worker_running"] is False
+            assert config_data["worker_id"] == "checkout-worker"
+            assert "worker_paused" not in str(config_data)
+    finally:
+        await sandbox_client.reset()
+
+
+@pytest.mark.integration
+async def test_upstream_maintenance_fault_injection(sandbox_client, live_settings):
+    """Verify upstream_maintenance fault causes 503 while config remains inventory-local."""
+    await sandbox_client.reset()
+    try:
+        # Inject upstream_maintenance fault
+        url = f"{live_settings.il_sandbox_base_url}/operator/inject"
+        headers = {"Authorization": f"Bearer {live_settings.il_sandbox_admin_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            inject_resp = await ac.post(
+                url,
+                headers=headers,
+                json={"family": "upstream_maintenance", "variant_seed": 1},
+            )
+            assert inject_resp.status_code == 200
+            assert inject_resp.json()["family"] == "upstream_maintenance"
+
+        # Checkout fails with 503
+        failing_key = uuid4()
+        write_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_write_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            checkout_resp = await ac.post(
+                f"{live_settings.il_sandbox_base_url}/checkout",
+                headers=write_headers,
+                json={"request_key": str(failing_key), "sku": "SKU-1", "quantity": 1},
+            )
+            assert checkout_resp.status_code == 503
+            err_body = checkout_resp.json()
+            assert "upstream_maintenance" in str(err_body) or "maintenance" in str(err_body).lower()
+
+        # Diagnostics config shows endpoint_key remains inventory-local
+        read_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_read_token}"}
+        async with httpx.AsyncClient(timeout=10.0) as ac:
+            config_resp = await ac.get(
+                f"{live_settings.il_sandbox_base_url}/diagnostics/config",
+                headers=read_headers,
+            )
+            assert config_resp.status_code == 200
+            config_data = config_resp.json()
+            assert config_data["endpoint_key"] == "inventory-local"
+            assert "upstream_maintenance" not in str(config_data)
+    finally:
+        await sandbox_client.reset()
