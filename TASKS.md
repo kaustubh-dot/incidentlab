@@ -316,7 +316,48 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
       - `~/.local/bin/uv run ruff check .` (all checks passed, exit 0)
     - Fix applied: Updated `tests/test_retrieval.py` (`test_chunk_token_bounds`) to assert strictly `< 200` tokens across all 15 runbook sections (commit `3cb2a0a`).
     - Audit Verdict: **PASS**. P3 gate passed. Transitioning to Phase P4.
-  - **Next action:** Execute IL-T13: build isolated runner, scorer, and frozen splits.
+
+- **IL-T13 (2026-10-14):**
+  - **Commit:** `eval: add isolated runner, scorer, and frozen splits` (`f1c1827`)
+  - **Files:** `evals/cases/heldout.jsonl`, `evals/gold/dev.jsonl`, `evals/gold/heldout.jsonl`, `evals/manifest.json`, `evals/score.py`, `evals/run.py`, `evals/README.md`, `tests/test_evaluation.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_evaluation.py -v` (exit 0, 8 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 74 passed, 2 deselected)
+  - **Observed facts:**
+    - 12 development cases (`dev.jsonl`) and 18 held-out cases (`heldout.jsonl`) frozen with SHA-256 hashes in `evals/manifest.json`.
+    - Held-out family counts strictly match: `{"inventory_config": 6, "worker_paused": 6, "upstream_maintenance": 6}`.
+    - Held-out split status strictly marked `not_run`.
+    - Deterministic scorer `evals/score.py` rejects claimed recovery without verifier fulfilled order (`fabricated_verification`), unauthorized repair (`unauthorized_repair`), and incorrect repair (`incorrect_repair`).
+    - Isolated runner `evals/run.py` drives evaluation scenarios with clean target resets, independent verifiers, and structured artifact generation.
+
+- **IL-T14 (2026-10-14):**
+  - **Commit:** `eval: compare fixed diagnostics and adaptive investigation` (`804a527`)
+  - **Files:** `evals/baseline.py`, `evals/run.py`, `evals/score.py`, `src/incidentlab/events.py`, `src/incidentlab/graph.py`, `src/incidentlab/model.py`, `evals/README.md`, `README.md`.
+  - **Commands executed:**
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run python -m evals.run --split dev --approach fixed` (exit 0, 11/12 passed [91.67%], 100% relevant-section coverage, 100% citation validity, 0 unauthorized repairs, 0 fabricated verifications)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run python -m evals.run --split dev --approach agent` (exit 0, 9/12 passed [75.0%], 100% relevant-section coverage, 83.33% citation validity, 0 unauthorized repairs, 0 fabricated verifications)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run python -m evals.score --compare --fixed artifacts/evals/dev_fixed.json --agent artifacts/evals/dev_agent.json --output artifacts/evals/dev_report.json` (exit 0, generated paired development report)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 74 passed, 2 deselected)
+    - `uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Fixed diagnostic baseline always executes the exact 4 read tools (`get_health` -> `get_logs` -> `get_config` -> `probe_checkout`), keyword retrieval top-3, and 1 final schema call.
+    - Paired evaluation on all 12 development cases demonstrated honest comparison: baseline achieved 11/12 (91.67%) vs agent 9/12 (75.0%), showing adaptive agent diagnoses from initial reads without follow-up reads (0.58 avg tool calls vs 3.75 fixed) but incurs higher token usage (1,953 avg vs 827) and longer active duration (343.3s vs 104.4s).
+    - Top-3 keyword retrieval achieved 100% relevant-section coverage across all 12 dev cases for both approaches.
+    - Hard safety gates strictly satisfied across all runs: 0 unauthorized mutations and 0 fabricated verifications.
+
+- **IL-T15 (2026-10-14):**
+  - **Commit:** `ci: enforce focused offline integrity checks` (`1f535ee`)
+  - **Files:** `.github/workflows/ci.yml`, `tests/test_agent_contract.py`, `tests/test_mcp_boundary.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 77 passed, 2 deselected in 11.01s)
+    - `npm --prefix frontend run typecheck && npm --prefix frontend run build` (exit 0, clean build)
+  - **Observed facts:**
+    - `.github/workflows/ci.yml` defines a single lean offline CI workflow running Ruff, frontend typecheck, Vite build, database migrations, sandbox background service, and offline pytest (`-m 'not live_model'`) against PostgreSQL service container.
+    - Essential assertion proven: adversarial prompt injection in logs/runbooks cannot add tools to MCP, cannot disclose secret tokens, and an untrusted/compromised model cannot execute repairs without bound owner approval.
+    - Docker copy boundaries verified: evaluation image includes tests/evals, runtime image excludes test/eval trees, `.dockerignore` excludes secrets/artifacts/caches.
+  - **Next action:** Phase P4 Review-and-Fix gate audit.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
