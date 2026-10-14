@@ -46,8 +46,10 @@ def test_index_and_retrieve_runbooks(live_settings):
 
 
 def test_chunk_token_bounds():
-    """Verify all runbook sections in data/runbooks are bounded to at most 200 words."""
+    """Verify all runbook sections in data/runbooks are bounded to at most 200 tokens."""
     from pathlib import Path
+
+    from incidentlab.model import count_request_tokens
 
     runbook_dir = Path(__file__).resolve().parent.parent / "data" / "runbooks"
     for md_file in runbook_dir.glob("*.md"):
@@ -57,7 +59,7 @@ def test_chunk_token_bounds():
             lines = sec.split("\n")
             sec_name = lines[0].strip()
             body = "\n".join(lines[1:]).strip()
-            words = body.split()
-            assert len(words) <= 200, (
-                f"Section {sec_name} in {md_file.name} has {len(words)} words (> 200)"
+            tok_count = count_request_tokens([{"role": "user", "content": body}])
+            assert tok_count <= 200, (
+                f"Section {sec_name} in {md_file.name} has {tok_count} tokens (> 200)"
             )

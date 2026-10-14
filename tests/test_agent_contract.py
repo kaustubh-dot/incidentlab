@@ -128,6 +128,50 @@ def test_build_context_token_bounds_and_notes():
         build_context(state, token_budget=20)
 
 
+def test_context_keeps_required_evidence_within_budget():
+    """Verify build_context retains approval-critical evidence IDs within token budget."""
+    import json
+
+    from incidentlab.model import count_request_tokens
+
+    state = {
+        "incident_id": str(uuid4()),
+        "symptom": "Checkout requests return 503 inventory_unavailable",
+        "request_id": str(uuid4()),
+        "order_id": None,
+        "evidence_ids": ["ev:fixture:1", "ev:fixture:2"],
+        "case_notes": [
+            {
+                "hypothesis": "Endpoint misconfiguration observed in diagnostics",
+                "uncertainty": "",
+                "evidence_ids": ["ev:fixture:1"],
+            }
+        ],
+        "recent_results": [
+            {
+                "evidence_id": "ev:fixture:1",
+                "kind": "config",
+                "data": {"endpoint_key": "inventory-legacy", "revision": 12},
+            },
+            {
+                "evidence_id": "ev:fixture:2",
+                "kind": "probe",
+                "data": {"status": 503, "reachable": False},
+            },
+        ],
+        "retrieved_runbooks": [
+            {
+                "chunk_id": "inventory:1:repair",
+                "content": "Authorized repair action is set_inventory_endpoint to inventory-local.",
+            }
+        ],
+    }
+
+    messages = build_context(state, token_budget=6000)
+    assert count_request_tokens(messages) <= 6000
+    assert "ev:fixture:1" in json.dumps(messages)
+
+
 @pytest.mark.integration
 @pytest.mark.live_model
 async def test_live_investigation_inventory_fault(live_settings):
