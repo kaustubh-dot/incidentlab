@@ -257,6 +257,320 @@ def qualify_runtime(output_path: Path | None = None) -> dict[str, Any]:
     return qualification
 
 
+async def resolve_unknown_cli(
+    incident_id_str: str,
+    note: str | None = None,
+    acknowledge: str | None = None,
+    confirm_quiesced: bool = False,
+    settings: Settings | None = None,
+    client: Any | None = None,
+) -> int:
+    """Implement operator procedure for narrow unknown-outcome resolution per ARCHITECTURE.md.
+
+    1. Requires locally configured owner credential and control DB authority.
+    2. Prints incident/proposal/execution binding and last dispatch state.
+    3. Performs fresh read-only target and receipt lookup; records observations as evidence.
+    4. If durable receipt found: routes to existing outcome (never closes as unknown).
+    5. If target or receipt lookup fails/unreachable: fails visibly and leaves block.
+    6. For reachable target with unresolved history:
+       Requires owner confirmation of quiesce, nonempty inspection note,
+       and exact typed acknowledgment 'ACKNOWLEDGE UNKNOWN <execution-key>'.
+       Commits 'closed_unknown' under row lock atomically with event 'execution.closed_unknown'.
+       Execution row stays 'unknown' for audit; terminal incident releases one-active-incident lock.
+       Zero repair POST replay, zero mutation, zero verification-success declaration.
+    """
+    from uuid import UUID, uuid4
+
+    import httpx
+    from psycopg.types.json import Jsonb
+
+    from incidentlab.db import get_control_connection
+    from incidentlab.events import record_event
+    from incidentlab.executor import reconcile_execution
+
+    if settings is None:
+        settings = Settings.from_env()
+
+    try:
+        incident_id = UUID(incident_id_str)
+    except Exception as exc:
+        sys.stderr.write(f"Error: Invalid incident UUID '{incident_id_str}': {exc}\n")
+        return 1
+
+    # 1. Inspect control DB under row lock
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, state, symptom
+                FROM control.incidents
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (incident_id,),
+            )
+            inc_row = cur.fetchone()
+            if not inc_row:
+                sys.stderr.write(f"Error: Incident {incident_id} not found.\n")
+                return 1
+
+            inc_state, symptom = inc_row[1], inc_row[2]
+            terminal_states = {
+                "verified_recovered",
+                "verification_failed",
+                "escalated",
+                "failed",
+                "rejected",
+                "expired",
+                "cancelled",
+                "closed_unknown",
+            }
+            if inc_state in terminal_states:
+                sys.stderr.write(
+                    f"Error: Incident {incident_id} is already in terminal state '{inc_state}'.\n"
+                )
+                return 1
+
+            # Get latest execution
+            cur.execute(
+                """
+                SELECT e.execution_key, e.proposal_id, e.state, e.payload_digest,
+                       e.expected_revision, e.claimed_at, e.dispatched_at, e.receipt,
+                       p.payload, p.target_revision
+                FROM control.executions e
+                JOIN control.proposals p ON e.proposal_id = p.id
+                WHERE e.incident_id = %s
+                ORDER BY e.claimed_at DESC
+                LIMIT 1
+                """,
+                (incident_id,),
+            )
+            exec_row = cur.fetchone()
+            if not exec_row:
+                sys.stderr.write(
+                    f"Error: No execution found for incident {incident_id}.\n"
+                )
+                return 1
+
+            (
+                exec_key,
+                prop_id,
+                exec_state,
+                payload_digest,
+                expected_rev,
+                claimed_at,
+                dispatched_at,
+                receipt_data,
+                payload_data,
+                prop_rev,
+            ) = exec_row
+
+    # 2. Print binding and dispatch state
+    print("=" * 60)
+    print("INCIDENTLAB OPERATOR UNKNOWN RESOLUTION")
+    print("=" * 60)
+    print(f"Incident ID:       {incident_id} (state: {inc_state})")
+    print(f"Symptom:           {symptom}")
+    print(f"Proposal ID:       {prop_id}")
+    print(f"Execution Key:     {exec_key}")
+    print(f"Execution State:   {exec_state}")
+    print(f"Expected Revision: {expected_rev}")
+    print(f"Payload Digest:    {payload_digest}")
+    print(f"Payload:           {json.dumps(payload_data)}")
+    print(f"Claimed At:        {claimed_at}")
+    print(f"Dispatched At:     {dispatched_at}")
+    print("=" * 60)
+
+    # 3. Fresh read-only inspection of sandbox target
+    health_url = f"{settings.il_sandbox_base_url}/diagnostics/health"
+    config_url = f"{settings.il_sandbox_base_url}/diagnostics/config"
+    diag_headers = {"Authorization": f"Bearer {settings.il_sandbox_read_token}"}
+
+    try:
+        if client is not None:
+            h_resp = await client.get(health_url, headers=diag_headers, timeout=5.0)
+            c_resp = await client.get(config_url, headers=diag_headers, timeout=5.0)
+        else:
+            async with httpx.AsyncClient(timeout=5.0) as ac:
+                h_resp = await ac.get(health_url, headers=diag_headers)
+                c_resp = await ac.get(config_url, headers=diag_headers)
+
+        if h_resp.status_code != 200 or c_resp.status_code != 200:
+            sys.stderr.write(
+                f"ERROR: Sandbox diagnostics unavailable (health: {h_resp.status_code}, "
+                f"config: {c_resp.status_code}). Leaving incident unresolved and blocking.\n"
+            )
+            return 1
+        health_data = h_resp.json()
+        config_data = c_resp.json()
+    except Exception as exc:
+        sys.stderr.write(
+            f"ERROR: Sandbox target unreachable: {exc}. "
+            "Leaving incident unresolved and blocking new incidents.\n"
+        )
+        return 1
+
+    print("Current Sandbox Target State:")
+    print(f"  Target Revision:    {health_data.get('target_revision')}")
+    print(f"  Inventory Endpoint: {config_data.get('inventory_endpoint_key')}")
+    print(f"  Worker Running:     {config_data.get('worker_running')}")
+
+    # 4. Fresh read-only receipt lookup
+    repair_url = f"{settings.il_sandbox_base_url}/repairs/{exec_key}"
+    repair_headers = {"Authorization": f"Bearer {settings.il_sandbox_write_token}"}
+    try:
+        if client is not None:
+            r_resp = await client.get(repair_url, headers=repair_headers, timeout=5.0)
+        else:
+            async with httpx.AsyncClient(timeout=5.0) as ac:
+                r_resp = await ac.get(repair_url, headers=repair_headers)
+    except Exception as exc:
+        sys.stderr.write(
+            f"ERROR: Sandbox receipt lookup unreachable: {exc}. "
+            "Leaving incident unresolved and blocking new incidents.\n"
+        )
+        return 1
+
+    if r_resp.status_code not in (200, 404):
+        sys.stderr.write(
+            f"ERROR: Sandbox receipt lookup failed with HTTP {r_resp.status_code}: {r_resp.text}. "
+            "Leaving incident unresolved and blocking new incidents.\n"
+        )
+        return 1
+
+    # Record observation as evidence
+    ev_id = f"ev:unknown_inspect:{uuid4().hex[:8]}"
+    obs_data = {
+        "target_health": health_data,
+        "target_config": config_data,
+        "receipt_lookup_status": r_resp.status_code,
+    }
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO control.evidence (
+                    incident_id, evidence_id, kind, source, source_version,
+                    section_id, observed_at, data
+                ) VALUES (
+                    %s, %s, 'target_observation', 'diagnostics', 'v1',
+                    'resolve-unknown', NOW(), %s
+                )
+                """,
+                (str(incident_id), ev_id, Jsonb(obs_data)),
+            )
+        conn.commit()
+
+    # 5. Route durable receipt if found
+    if r_resp.status_code == 200:
+        print(f"\nDurable receipt found in sandbox for {exec_key}: {r_resp.text}")
+        print("Routing to existing reconciliation outcome (not closing as unknown)...")
+        recon_view = await reconcile_execution(exec_key, settings=settings, client=client)
+        print(f"Execution reconciled to state: {recon_view.state}")
+        return 0
+
+    # 6. Unresolved history: require operator confirmations
+    print(f"\nNo durable receipt found in sandbox for execution key {exec_key} (HTTP 404).")
+    print("Target is reachable, but historical effect remains unresolved.")
+
+    if not confirm_quiesced:
+        try:
+            q_prompt = "Confirm that control/sandbox were quiesced per ARCHITECTURE.md (yes/no): "
+            quiesce_in = input(q_prompt).strip()
+        except (EOFError, OSError):
+            quiesce_in = "no"
+        if quiesce_in.lower() != "yes":
+            sys.stderr.write("Aborted: Operator did not confirm completed quiesce procedure.\n")
+            return 1
+
+    if note is not None and not note.strip():
+        sys.stderr.write("Aborted: Nonempty inspection note is required.\n")
+        return 1
+
+    if not note or not note.strip():
+        try:
+            note = input("Enter operator inspection note (nonempty): ").strip()
+        except (EOFError, OSError):
+            note = ""
+        if not note or not note.strip():
+            sys.stderr.write("Aborted: Nonempty inspection note is required.\n")
+            return 1
+
+    expected_ack = f"ACKNOWLEDGE UNKNOWN {exec_key}"
+    if not acknowledge:
+        try:
+            acknowledge = input(f"Type exactly '{expected_ack}' to confirm: ").strip()
+        except (EOFError, OSError):
+            acknowledge = ""
+
+    if acknowledge != expected_ack:
+        sys.stderr.write(
+            f"Aborted: Acknowledgment '{acknowledge}' did not match required '{expected_ack}'.\n"
+        )
+        return 1
+
+    # 7. Commit closed_unknown atomically under row lock
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            # Recheck under lock
+            cur.execute(
+                "SELECT state FROM control.incidents WHERE id = %s FOR UPDATE",
+                (incident_id,),
+            )
+            cur_state = cur.fetchone()[0]
+            if cur_state in terminal_states:
+                sys.stderr.write(
+                    f"Error: Incident {incident_id} changed to terminal state '{cur_state}'.\n"
+                )
+                return 1
+
+            outcome_data = {
+                "effect_unknown": True,
+                "note": note,
+                "owner_id": "owner",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "evidence_ids": [ev_id],
+                "execution_key": str(exec_key),
+            }
+            cur.execute(
+                """
+                UPDATE control.incidents
+                SET state = 'closed_unknown',
+                    updated_at = NOW(),
+                    outcome = %s
+                WHERE id = %s
+                """,
+                (Jsonb(outcome_data), incident_id),
+            )
+            # Execution row state stays 'unknown' for audit
+            cur.execute(
+                """
+                UPDATE control.executions
+                SET state = 'unknown'
+                WHERE execution_key = %s
+                """,
+                (exec_key,),
+            )
+            record_event(
+                conn,
+                incident_id,
+                "execution.closed_unknown",
+                {
+                    "execution_key": str(exec_key),
+                    "owner_id": "owner",
+                    "note": note,
+                    "evidence_ids": [ev_id],
+                    "effect_unknown": True,
+                },
+            )
+        conn.commit()
+
+    print(f"\nSUCCESS: Incident {incident_id} closed as closed_unknown.")
+    print("Outcome recorded with effect_unknown=true and audit event 'execution.closed_unknown'.")
+    print("One-active-incident constraint released.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="IncidentLab CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -305,11 +619,37 @@ def main():
         choices=["interactive", "approve", "reject"],
         help="Approval mode: interactive, approve, or reject",
     )
-    subparsers.add_parser("resolve-unknown", help="Resolve unknown execution state (P3)")
+    resolve_unknown_parser = subparsers.add_parser(
+        "resolve-unknown", help="Resolve unknown execution state (P3)"
+    )
+    resolve_unknown_parser.add_argument(
+        "--incident",
+        type=str,
+        required=True,
+        help="Incident UUID to resolve",
+    )
+    resolve_unknown_parser.add_argument(
+        "--note",
+        type=str,
+        default=None,
+        help="Nonempty inspection note",
+    )
+    resolve_unknown_parser.add_argument(
+        "--acknowledge",
+        type=str,
+        default=None,
+        help="Exact confirmation string: ACKNOWLEDGE UNKNOWN <execution-key>",
+    )
+    resolve_unknown_parser.add_argument(
+        "--confirm-quiesced",
+        action="store_true",
+        default=False,
+        help="Confirm that control/sandbox were stopped/restarted per ARCHITECTURE.md",
+    )
 
     args = parser.parse_args()
 
-    future_cmds = ("resolve-unknown",)
+    future_cmds: tuple[str, ...] = ()
     if args.command == "qualify":
         result = qualify_runtime(args.output)
         print(json.dumps(result, indent=2))
@@ -698,6 +1038,16 @@ def main():
                 return 1
 
         sys.exit(asyncio.run(run_smoke_demo()))
+    elif args.command == "resolve-unknown":
+        rc = asyncio.run(
+            resolve_unknown_cli(
+                incident_id_str=args.incident,
+                note=args.note,
+                acknowledge=args.acknowledge,
+                confirm_quiesced=args.confirm_quiesced,
+            )
+        )
+        sys.exit(rc)
     elif args.command in future_cmds:
         sys.stderr.write(
             f"Command '{args.command}' belongs to a later task/phase and is not yet implemented.\n"

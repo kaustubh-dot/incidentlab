@@ -465,3 +465,98 @@ async def test_claim_execution_stale_target_revision(live_settings):
             cur.execute("SELECT state FROM control.incidents WHERE id = %s", (inc_id,))
             assert cur.fetchone()[0] == "stale"
         assert _execution_count(conn, prop_id) == 0
+
+
+@pytest.mark.integration
+async def test_claim_execution_cancelled_rejects(live_settings):
+    """Verify claim_execution rejects if incident cancellation was requested."""
+    inc_id = uuid4()
+    rev = _get_target_revision(live_settings)
+    with get_control_connection(live_settings) as conn:
+        prop_id, digest = _seed_incident_and_proposal(
+            conn, inc_id, revision=rev, state="approved", cancel_requested=True
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO control.approvals (
+                    proposal_id, decision, owner_id, reviewed_digest, reviewed_revision
+                )
+                VALUES (%s, 'approve', 'owner', %s, %s)
+                """,
+                (prop_id, digest, rev),
+            )
+        conn.commit()
+
+    with pytest.raises(ApprovalError) as exc_info:
+        await claim_execution(inc_id, prop_id, settings=live_settings)
+
+    assert exc_info.value.code == "incident_cancelled"
+    with get_control_connection(live_settings) as conn:
+        assert _execution_count(conn, prop_id) == 0
+
+
+@pytest.mark.integration
+async def test_claim_execution_expired_proposal_rejects(live_settings):
+    """Verify claim_execution rejects if proposal has expired and marks incident expired."""
+    inc_id = uuid4()
+    rev = _get_target_revision(live_settings)
+    with get_control_connection(live_settings) as conn:
+        prop_id, digest = _seed_incident_and_proposal(
+            conn, inc_id, revision=rev, state="approved", expires_in_seconds=-10
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO control.approvals (
+                    proposal_id, decision, owner_id, reviewed_digest, reviewed_revision
+                )
+                VALUES (%s, 'approve', 'owner', %s, %s)
+                """,
+                (prop_id, digest, rev),
+            )
+        conn.commit()
+
+    with pytest.raises(ApprovalError) as exc_info:
+        await claim_execution(inc_id, prop_id, settings=live_settings)
+
+    assert exc_info.value.code == "proposal_expired"
+    with get_control_connection(live_settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT state FROM control.incidents WHERE id = %s", (inc_id,))
+            assert cur.fetchone()[0] == "expired"
+        assert _execution_count(conn, prop_id) == 0
+
+
+@pytest.mark.integration
+async def test_cancel_endpoint_prevents_subsequent_decision(live_settings):
+    """Verify owner cancel route cancels awaiting incident and blocks subsequent approval."""
+    app = create_app(live_settings)
+    headers = {"Authorization": f"Bearer {live_settings.il_owner_token}"}
+    transport = ASGITransport(app=app)
+    inc_id = uuid4()
+    rev = _get_target_revision(live_settings)
+
+    with get_control_connection(live_settings) as conn:
+        prop_id, digest = _seed_incident_and_proposal(conn, inc_id, revision=rev)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        # 1. Cancel incident
+        cancel_resp = await ac.post(f"/api/v1/incidents/{inc_id}/cancel", headers=headers)
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["state"] == "cancelled"
+
+        # 2. Attempt approval
+        decision_resp = await ac.post(
+            f"/api/v1/incidents/{inc_id}/decision",
+            headers=headers,
+            json={
+                "proposal_id": str(prop_id),
+                "payload_digest": digest,
+                "target_revision": rev,
+                "decision": "approve",
+            },
+        )
+        assert decision_resp.status_code == 409
+        assert decision_resp.json()["error"]["code"] == "incident_cancelled"
+

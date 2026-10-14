@@ -25,6 +25,7 @@ from incidentlab.executor import (
     CheckoutError,
     execute_claim,
     reconcile_execution,
+    reconcile_startup,
     submit_checkout,
     wait_for_order_fulfillment,
 )
@@ -101,7 +102,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Startup checks
+        # Startup checks and durable reconciliation
+        if app.state.settings is not None:
+            try:
+                await reconcile_startup(app.state.settings)
+            except Exception as exc:
+                logger.warning("Startup reconciliation warning: %s", exc)
         yield
         # Shutdown cleanup
 
@@ -480,6 +486,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         try:
                             receipt = await execute_claim(c, settings=s)
                             if receipt.result == "applied":
+                                with get_control_connection(s) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute(
+                                            """
+                                            SELECT state, cancel_requested
+                                            FROM control.incidents
+                                            WHERE id = %s
+                                            """,
+                                            (inc_id,),
+                                        )
+                                        row = cur.fetchone()
+                                        if row and (row[0] == "cancelled" or row[1]):
+                                            return
                                 req_key = uuid4()
                                 await verify_checkout(inc_id, req_key, settings=s)
                         except Exception as err:

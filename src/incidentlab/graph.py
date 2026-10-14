@@ -532,6 +532,9 @@ async def run_investigation(
             ttl_seconds=settings.il_approval_ttl_seconds,
         )
 
+        if _check_cancellation(settings, incident_id):
+            return await _terminate_cancelled(settings, incident_id, state, t0)
+
         # Persist proposal into control.proposals
         with get_control_connection(settings) as conn:
             with conn.cursor() as cur:

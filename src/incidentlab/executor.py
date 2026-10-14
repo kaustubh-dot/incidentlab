@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -378,7 +379,48 @@ async def execute_claim(
                 "execution.receipt",
                 receipt.model_dump(mode="json"),
             )
-            if receipt.result == "applied":
+            # Check if cancellation was requested while dispatch was in flight
+            cur.execute(
+                """
+                SELECT cancel_requested
+                FROM control.incidents
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (claim.incident_id,),
+            )
+            c_row = cur.fetchone()
+            was_cancelled = c_row and c_row[0]
+
+            if was_cancelled:
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'cancelled', updated_at = NOW(),
+                        outcome = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        Jsonb(
+                            {
+                                "cancellation": "cancelled_in_flight",
+                                "effect": receipt.result,
+                                "receipt": receipt.model_dump(mode="json"),
+                            }
+                        ),
+                        claim.incident_id,
+                    ),
+                )
+                record_event(
+                    conn,
+                    claim.incident_id,
+                    "cancellation_completed",
+                    {
+                        "effect": receipt.result,
+                        "execution_key": str(claim.execution_key),
+                    },
+                )
+            elif receipt.result == "applied":
                 cur.execute(
                     """
                     UPDATE control.incidents
@@ -484,12 +526,47 @@ async def reconcile_execution(
                             execution_key,
                         ),
                     )
-                    if receipt.result == "applied":
+                    cur.execute(
+                        "SELECT cancel_requested FROM control.incidents WHERE id = %s",
+                        (inc_id,),
+                    )
+                    c_row = cur.fetchone()
+                    was_cancelled = c_row and c_row[0]
+
+                    if was_cancelled:
+                        cur.execute(
+                            """
+                            UPDATE control.incidents
+                            SET state = 'cancelled', updated_at = NOW(),
+                                outcome = %s
+                            WHERE id = %s AND state IN ('executing', 'execution_unknown')
+                            """,
+                            (
+                                Jsonb(
+                                    {
+                                        "cancellation": "cancelled_in_flight",
+                                        "effect": receipt.result,
+                                        "receipt": receipt.model_dump(mode="json"),
+                                    }
+                                ),
+                                inc_id,
+                            ),
+                        )
+                        record_event(
+                            conn,
+                            inc_id,
+                            "cancellation_completed",
+                            {
+                                "effect": receipt.result,
+                                "execution_key": str(execution_key),
+                            },
+                        )
+                    elif receipt.result == "applied":
                         cur.execute(
                             """
                             UPDATE control.incidents
                             SET state = 'verifying', updated_at = NOW()
-                            WHERE id = %s AND state = 'execution_unknown'
+                            WHERE id = %s AND state IN ('executing', 'execution_unknown')
                             """,
                             (inc_id,),
                         )
@@ -555,3 +632,136 @@ async def reconcile_execution(
             reconciled=False,
             error=str(exc),
         )
+
+
+async def reconcile_startup(
+    settings: Settings | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """Perform durable startup reconciliation for active incidents and executions.
+
+    Enforces ARCHITECTURE.md principles:
+    1. Ignores terminal incidents (verified_recovered, verification_failed, escalated,
+       failed, rejected, expired, cancelled, closed_unknown).
+    2. Awaiting approval incidents: restores waiting state without model rerun or repair dispatch;
+       marks expired if past expiry.
+    3. Executions in 'dispatching' or 'unknown': performs read-only receipt reconciliation.
+       If receipt applied, transitions incident to verifying.
+       If receipt missing/unresolved, leaves execution as unknown and incident as execution_unknown.
+    4. Executions in 'claimed' that never dispatched: safe to continue.
+    """
+    if settings is None:
+        settings = Settings.from_env()
+
+    results: list[dict[str, Any]] = []
+
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.id, i.state, p.id, p.expires_at
+                FROM control.incidents i
+                LEFT JOIN control.proposals p ON i.id = p.incident_id
+                WHERE i.state NOT IN (
+                    'verified_recovered', 'verification_failed', 'escalated',
+                    'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                )
+                """
+            )
+            active_incidents = cur.fetchall()
+
+    for inc_id, inc_state, prop_id, prop_expires_at in active_incidents:
+        now = datetime.now(UTC)
+        if inc_state == "awaiting_approval":
+            if prop_expires_at and now > prop_expires_at:
+                with get_control_connection(settings) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE control.incidents
+                            SET state = 'expired', updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (inc_id,),
+                        )
+                    record_event(
+                        conn,
+                        inc_id,
+                        "proposal_expired",
+                        {"proposal_id": str(prop_id), "reason": "expired during startup check"},
+                    )
+                results.append({"incident_id": inc_id, "action": "expired"})
+            else:
+                # Retain awaiting_approval with zero rerun or side effect
+                results.append({"incident_id": inc_id, "action": "retained_awaiting_approval"})
+        elif inc_state in ("executing", "execution_unknown", "verifying"):
+            with get_control_connection(settings) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT execution_key, state
+                        FROM control.executions
+                        WHERE incident_id = %s
+                        ORDER BY claimed_at DESC
+                        LIMIT 1
+                        """,
+                        (inc_id,),
+                    )
+                    exec_row = cur.fetchone()
+
+            if exec_row:
+                exec_key, exec_state = exec_row[0], exec_row[1]
+                if exec_state in ("dispatching", "unknown"):
+                    reconciled_view = await reconcile_execution(
+                        exec_key, settings=settings, client=client
+                    )
+                    if reconciled_view.receipt and reconciled_view.receipt.result == "applied":
+                        results.append({
+                            "incident_id": inc_id,
+                            "execution_key": exec_key,
+                            "action": "reconciled_applied",
+                        })
+                    else:
+                        # Missing receipt -> stays unknown, incident marked execution_unknown
+                        with get_control_connection(settings) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    UPDATE control.executions
+                                    SET state = 'unknown'
+                                    WHERE execution_key = %s
+                                    """,
+                                    (exec_key,),
+                                )
+                                cur.execute(
+                                    """
+                                    UPDATE control.incidents
+                                    SET state = 'execution_unknown', updated_at = NOW()
+                                    WHERE id = %s
+                                    """,
+                                    (inc_id,),
+                                )
+                            record_event(
+                                conn,
+                                inc_id,
+                                "error",
+                                {
+                                    "code": "execution_outcome_unknown",
+                                    "message": "Execution outcome unknown after startup check",
+                                    "execution_key": str(exec_key),
+                                },
+                            )
+                        results.append({
+                            "incident_id": inc_id,
+                            "execution_key": exec_key,
+                            "action": "execution_unknown",
+                        })
+                elif exec_state == "claimed":
+                    results.append({
+                        "incident_id": inc_id,
+                        "execution_key": exec_key,
+                        "action": "retained_claimed",
+                    })
+
+    return results
+
