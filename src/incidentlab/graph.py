@@ -219,10 +219,13 @@ def _check_cancellation(settings: Settings, incident_id: UUID) -> bool:
 async def run_investigation(
     incident_id: UUID,
     settings: Settings | None = None,
+    evidence_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute or resume bounded incident investigation advancing LangGraph state thread."""
     if settings is None:
         settings = Settings.from_env()
+
+    masked_tools = set(evidence_filter.get("masked_tools", [])) if evidence_filter else set()
 
     # Replay protection: if a proposal already exists, return state without duplicate insert
     with get_control_connection(settings) as conn:
@@ -308,35 +311,37 @@ async def run_investigation(
     if _check_cancellation(settings, incident_id):
         return await _terminate_cancelled(settings, incident_id, state, t0)
 
+    log_texts = ""
     async with McpSession(settings) as mcp:
-        health_ev = await mcp.call_read_tool(incident_id, "get_health", {})
-        logs_ev = await mcp.call_read_tool(
-            incident_id, "get_logs", {"request_id": request_id, "limit": 40}
-        )
+        if "get_health" not in masked_tools:
+            health_ev = await mcp.call_read_tool(incident_id, "get_health", {})
+            state["evidence_ids"].append(health_ev.evidence_id)
+            state["recent_results"].append(health_ev.model_dump(mode="json"))
+            state["read_count"] += 1
+        if "get_logs" not in masked_tools:
+            logs_ev = await mcp.call_read_tool(
+                incident_id, "get_logs", {"request_id": request_id, "limit": 40}
+            )
+            state["evidence_ids"].append(logs_ev.evidence_id)
+            state["recent_results"].append(logs_ev.model_dump(mode="json"))
+            state["read_count"] += 1
+            log_texts = " ".join(
+                e.get("message", "") for e in logs_ev.data.get("logs", [])
+            )
 
-    state["evidence_ids"].extend([health_ev.evidence_id, logs_ev.evidence_id])
-    state["recent_results"].extend([
-        health_ev.model_dump(mode="json"),
-        logs_ev.model_dump(mode="json"),
-    ])
-    state["read_count"] = 2
-
-    with get_control_connection(settings) as conn:
-        record_event(
-            conn,
-            incident_id,
-            "evidence_collected",
-            {"evidence_ids": [health_ev.evidence_id, logs_ev.evidence_id],
-             "sources": ["get_health", "get_logs"]},
-        )
+    if state["evidence_ids"]:
+        with get_control_connection(settings) as conn:
+            record_event(
+                conn,
+                incident_id,
+                "evidence_collected",
+                {"evidence_ids": list(state["evidence_ids"])},
+            )
 
     # Step 2: Retrieve Runbooks based on symptom and error logs
     if _check_cancellation(settings, incident_id):
         return await _terminate_cancelled(settings, incident_id, state, t0)
 
-    log_texts = " ".join(
-        e.get("message", "") for e in logs_ev.data.get("logs", [])
-    )
     query = f"{symptom} {log_texts}".strip()
     with get_control_connection(settings) as conn:
         runbook_evs = retrieve_runbooks(conn, query=query, limit=3)
@@ -400,10 +405,14 @@ async def run_investigation(
                 state["diagnosis"] = model_res.diagnosis
             break
         else:
-            # Tool calling mode
+            # Tool calling mode with unmasked tools
+            active_tools = [
+                t for t in MCP_TOOLS
+                if t["function"]["name"] not in masked_tools
+            ]
             model_res = await call_model(
                 messages=messages,
-                tools=MCP_TOOLS,
+                tools=active_tools,
                 final_schema=None,
                 settings=settings,
             )
@@ -430,6 +439,17 @@ async def run_investigation(
                     for tc in model_res.tool_calls:
                         if state["read_count"] >= 6:
                             break
+                        if tc.name in masked_tools:
+                            logger.warning("Tool %s is masked by evidence filter", tc.name)
+                            state["recent_results"].append({
+                                "tool": tc.name,
+                                "error": (
+                                    f"Tool '{tc.name}' is unavailable under current filters."
+                                ),
+                            })
+                            state["recent_results"] = state["recent_results"][-2:]
+                            state["read_count"] += 1
+                            continue
                         try:
                             ev = await mcp.call_read_tool(incident_id, tc.name, tc.args)
                             state["evidence_ids"].append(ev.evidence_id)

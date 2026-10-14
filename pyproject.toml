@@ -32,7 +32,7 @@ build-backend = "hatchling.build"
 packages = ["src/incidentlab"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 asyncio_mode = "auto"
 markers = [
     "integration: marks tests requiring local integration services",

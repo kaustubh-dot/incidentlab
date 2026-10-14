@@ -1,0 +1,37 @@
+{
+  "version": "1.0.0",
+  "created_at": "2026-10-14T12:00:00Z",
+  "splits": {
+    "dev": {
+      "case_count": 12,
+      "family_counts": {
+        "inventory_config": 4,
+        "worker_paused": 4,
+        "upstream_maintenance": 4
+      },
+      "cases_file": "evals/cases/dev.jsonl",
+      "cases_sha256": "962d8e59276955e00b8900c0c6cfc00c454e576cb9dd613d34dfb486169b2887",
+      "gold_file": "evals/gold/dev.jsonl",
+      "gold_sha256": "2691f4096a08dff38b5b8809b0038c5537c0389914bd4d7656efe9a10873d1bc",
+      "status": "ready"
+    },
+    "heldout": {
+      "case_count": 18,
+      "family_counts": {
+        "inventory_config": 6,
+        "worker_paused": 6,
+        "upstream_maintenance": 6
+      },
+      "cases_file": "evals/cases/heldout.jsonl",
+      "cases_sha256": "9bf5303fab0b6dec9428096823f4c60f0a122fdb89dd8b38fd1a873f15088342",
+      "gold_file": "evals/gold/heldout.jsonl",
+      "gold_sha256": "0f8347c0aace5c3906a13ff7282a57877509ae5aa3d34da8f88cd8368b74841c",
+      "status": "not_run"
+    }
+  },
+  "runbooks": {
+    "inventory.md": "e2c938553f04d647fa9b5465d307910c05f734d67a588ca001f4486934f36ccc",
+    "upstream.md": "80ab568f101ed532687c19d63d0472239c99658abe6283f55d2b50d64c2a1e1e",
+    "worker.md": "cb389235437ee9ce7c6b79f6f41d95c1f8d381ba34f39a319023d2bf67426798"
+  }
+}

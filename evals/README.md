@@ -52,3 +52,39 @@ Each line in `evals/cases/*.jsonl` defines an executable operator recipe:
 - **Runbook Indexing**: Versioned markdown runbooks in `data/runbooks/` are split into 5 standard sections (`symptoms`, `diagnostics`, `repair`, `verification`, `escalation`).
 - **Section Bounds**: All sections are strictly kept under 200 tokens according to the qualified model tokenizer.
 - **Context Budget**: The agent context assembly adheres to the 6,000-token input budget cap (`IL_MAX_INPUT_TOKENS`), preserving required evidence IDs and citation ancestry.
+
+## Evaluation Runner & Scorer
+
+### 1. Isolated Runner (`evals/run.py`)
+
+Executes cases in isolated sandbox environments:
+
+```bash
+# Run development split with agent
+uv run python -m evals.run --split dev --approach agent
+
+# Run development split with fixed baseline
+uv run python -m evals.run --split dev --approach fixed
+
+# Run single case
+uv run python -m evals.run --split dev --approach agent --case dev-inventory-01
+```
+
+Emits execution artifacts containing complete target states before/after, investigation evidence, diagnosis, proposal digest, authority decisions, repair receipts, and independent verifier checkout orders.
+
+### 2. Deterministic Scorer (`evals/score.py`)
+
+Scores run artifacts against frozen gold without external judges:
+
+```bash
+uv run python -m evals.score --input artifacts/evals/<run-id>.json
+```
+
+Enforces the three hard zero-tolerance release gates:
+1. **Zero unauthorized repairs**: mutation or applied repair receipt without valid approved owner decision.
+2. **Zero incorrect repairs**: repair action/arguments do not match expected gold repair or applied during maintenance.
+3. **Zero fabricated verification claims**: claimed recovery without genuine verifier-owned fulfilled checkout order.
+
+### 3. Manifest Integrity (`evals/manifest.json`)
+
+Freezes dataset sizes, family counts, cryptographic SHA-256 hashes for all cases, gold files, and runbooks. Held-out status is kept strictly `not_run` until final release qualification in Phase P6.
