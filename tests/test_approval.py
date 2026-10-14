@@ -171,7 +171,7 @@ async def test_decide_proposal_approve_claims_execution(live_settings):
     with get_control_connection(live_settings) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT state FROM control.incidents WHERE id = %s", (inc_id,))
-            assert cur.fetchone()[0] == "executing"
+            assert cur.fetchone()[0] in ("executing", "verifying", "verified_recovered")
 
             cur.execute(
                 """
@@ -183,7 +183,7 @@ async def test_decide_proposal_approve_claims_execution(live_settings):
             )
             claim = cur.fetchone()
             assert claim is not None
-            assert claim[1] == "claimed"
+            assert claim[1] in ("claimed", "dispatching", "applied")
             assert claim[2] == digest
             assert claim[3] == rev
 

@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
+from psycopg.types.json import Jsonb
+from pydantic import TypeAdapter
 
 from incidentlab.config import Settings
+from incidentlab.db import get_control_connection
+from incidentlab.events import record_event
 from incidentlab.sandbox.schemas import CheckoutAccepted, OrderView
+from incidentlab.schemas import (
+    ExecutionClaim,
+    ExecutionView,
+    RepairPayload,
+    RepairReceipt,
+)
+
+_repair_payload_adapter = TypeAdapter(RepairPayload)
 
 
 class CheckoutError(Exception):
@@ -131,3 +144,414 @@ async def wait_for_order_fulfillment(
     if last_order is not None:
         return last_order
     raise TimeoutError(f"Timed out waiting for order {order_id} after {timeout_seconds}s")
+
+
+async def execute_claim(
+    claim: ExecutionClaim,
+    settings: Settings | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> RepairReceipt:
+    """Dispatch the stored finite repair once without automatic retries.
+
+    Validates stored payload, action allowlist, digest, revision, and cancellation.
+    Persists 'dispatching' before dispatching the HTTP call.
+    """
+    if settings is None:
+        settings = Settings.from_env()
+
+    # 1. Action allowlist check (for IL-T08 only set_inventory_endpoint is permitted)
+    if claim.payload.action not in ("set_inventory_endpoint",):
+        raise ValueError(
+            f"Action '{claim.payload.action}' is not supported in this phase"
+        )
+
+    # 2. Check cancellation and state under control DB lock
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cancel_requested, state
+                FROM control.incidents
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (claim.incident_id,),
+            )
+            inc_row = cur.fetchone()
+            if not inc_row:
+                raise RuntimeError(f"Incident {claim.incident_id} not found")
+            cancel_requested, _inc_state = inc_row[0], inc_row[1]
+            if cancel_requested:
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'cancelled', updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (claim.incident_id,),
+                )
+                record_event(
+                    conn,
+                    claim.incident_id,
+                    "cancel.requested",
+                    {"reason": "cancellation requested before dispatch"},
+                )
+                conn.commit()
+                raise RuntimeError("Execution cancelled before dispatch")
+
+            # Check proposal expiry
+            cur.execute(
+                """
+                SELECT expires_at
+                FROM control.proposals
+                WHERE id = %s
+                """,
+                (claim.proposal_id,),
+            )
+            prop_row = cur.fetchone()
+            if not prop_row:
+                raise RuntimeError(f"Proposal {claim.proposal_id} not found")
+            expires_at = prop_row[0]
+            if datetime.now(UTC) > expires_at:
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'expired', updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (claim.incident_id,),
+                )
+                record_event(
+                    conn,
+                    claim.incident_id,
+                    "error",
+                    {
+                        "code": "approval_expired",
+                        "message": "Proposal expired before dispatch",
+                    },
+                )
+                conn.commit()
+                raise RuntimeError("Proposal expired before dispatch")
+
+            # Persist state 'dispatching' before the HTTP call
+            cur.execute(
+                """
+                UPDATE control.executions
+                SET state = 'dispatching', dispatched_at = NOW()
+                WHERE execution_key = %s
+                """,
+                (claim.execution_key,),
+            )
+            record_event(
+                conn,
+                claim.incident_id,
+                "execution.dispatched",
+                {
+                    "execution_key": str(claim.execution_key),
+                    "action": claim.payload.action,
+                    "expected_revision": claim.expected_revision,
+                },
+            )
+            conn.commit()
+
+    # 3. Dispatch the single RepairRequest POST (never automatic HTTP retries)
+    url = f"{settings.il_sandbox_base_url}/repairs"
+    headers = {
+        "Authorization": f"Bearer {settings.il_sandbox_write_token}",
+        "Content-Type": "application/json",
+    }
+    req_body = {
+        "execution_key": str(claim.execution_key),
+        "incident_id": str(claim.incident_id),
+        "proposal_id": str(claim.proposal_id),
+        "payload": claim.payload.model_dump(mode="json"),
+        "payload_digest": claim.payload_digest,
+        "expected_revision": claim.expected_revision,
+    }
+
+    try:
+        if client is not None:
+            resp = await client.post(url, headers=headers, json=req_body, timeout=10.0)
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as ac:
+                resp = await ac.post(url, headers=headers, json=req_body)
+    except Exception as net_err:
+        # Mark unknown and attempt receipt reconciliation
+        with get_control_connection(settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE control.executions
+                    SET state = 'unknown'
+                    WHERE execution_key = %s
+                    """,
+                    (claim.execution_key,),
+                )
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'execution_unknown', updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (claim.incident_id,),
+                )
+                record_event(
+                    conn,
+                    claim.incident_id,
+                    "error",
+                    {
+                        "code": "execution_outcome_unknown",
+                        "message": f"Timeout or network error during dispatch: {net_err}",
+                        "execution_key": str(claim.execution_key),
+                    },
+                )
+                conn.commit()
+
+        # Reconcile receipt via read-only lookup
+        reconcile_res = await reconcile_execution(
+            claim.execution_key, settings=settings, client=client
+        )
+        if reconcile_res.receipt is not None:
+            return reconcile_res.receipt
+        raise RuntimeError(
+            f"Dispatch failed with network error and receipt could not be reconciled: {net_err}"
+        ) from net_err
+
+    if resp.status_code == 409:
+        # Mismatched execution key conflict
+        with get_control_connection(settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE control.executions
+                    SET state = 'unknown'
+                    WHERE execution_key = %s
+                    """,
+                    (claim.execution_key,),
+                )
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'failed', updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (claim.incident_id,),
+                )
+                record_event(
+                    conn,
+                    claim.incident_id,
+                    "error",
+                    {
+                        "code": "execution_key_conflict",
+                        "message": "Key conflict in sandbox",
+                    },
+                )
+                conn.commit()
+        raise RuntimeError("Execution key conflict reported by sandbox")
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Sandbox repair failed with HTTP {resp.status_code}: {resp.text}"
+        )
+
+    receipt_data = resp.json()
+    receipt = RepairReceipt.model_validate(receipt_data)
+
+    # 4. Store returned receipt and update incident state
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE control.executions
+                SET state = %s, receipt = %s
+                WHERE execution_key = %s
+                """,
+                (
+                    receipt.result,
+                    Jsonb(receipt.model_dump(mode="json")),
+                    claim.execution_key,
+                ),
+            )
+            record_event(
+                conn,
+                claim.incident_id,
+                "execution.receipt",
+                receipt.model_dump(mode="json"),
+            )
+            if receipt.result == "applied":
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'verifying', updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (claim.incident_id,),
+                )
+            else:
+                # Precondition failed -> stale/failed
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'failed', updated_at = NOW(),
+                        outcome = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        Jsonb(
+                            {
+                                "error": "precondition_failed",
+                                "receipt": receipt.model_dump(mode="json"),
+                            }
+                        ),
+                        claim.incident_id,
+                    ),
+                )
+            conn.commit()
+
+    return receipt
+
+
+async def reconcile_execution(
+    execution_key: UUID,
+    settings: Settings | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> ExecutionView:
+    """Read a durable sandbox receipt via GET /repairs/{key}; never dispatches."""
+    if settings is None:
+        settings = Settings.from_env()
+
+    # Read current execution record from control DB
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.execution_key, e.proposal_id, e.incident_id, e.state,
+                       e.payload_digest, e.expected_revision, e.claimed_at,
+                       e.dispatched_at, e.receipt, p.payload
+                FROM control.executions e
+                JOIN control.proposals p ON e.proposal_id = p.id
+                WHERE e.execution_key = %s
+                """,
+                (execution_key,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise RuntimeError(f"Execution {execution_key} not found")
+
+    (
+        exec_key,
+        prop_id,
+        inc_id,
+        exec_state,
+        digest,
+        expected_rev,
+        claimed_at,
+        dispatched_at,
+        stored_receipt,
+        payload_data,
+    ) = row
+
+    payload = _repair_payload_adapter.validate_python(payload_data)
+    receipt_obj = (
+        RepairReceipt.model_validate(stored_receipt) if stored_receipt else None
+    )
+
+    # Query sandbox read-only GET /repairs/{execution_key}
+    url = f"{settings.il_sandbox_base_url}/repairs/{execution_key}"
+    headers = {"Authorization": f"Bearer {settings.il_sandbox_write_token}"}
+
+    try:
+        if client is not None:
+            resp = await client.get(url, headers=headers, timeout=5.0)
+        else:
+            async with httpx.AsyncClient(timeout=5.0) as ac:
+                resp = await ac.get(url, headers=headers)
+
+        if resp.status_code == 200:
+            receipt = RepairReceipt.model_validate(resp.json())
+            # Update control DB if not already saved
+            with get_control_connection(settings) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE control.executions
+                        SET state = %s, receipt = %s
+                        WHERE execution_key = %s
+                        """,
+                        (
+                            receipt.result,
+                            Jsonb(receipt.model_dump(mode="json")),
+                            execution_key,
+                        ),
+                    )
+                    if receipt.result == "applied":
+                        cur.execute(
+                            """
+                            UPDATE control.incidents
+                            SET state = 'verifying', updated_at = NOW()
+                            WHERE id = %s AND state = 'execution_unknown'
+                            """,
+                            (inc_id,),
+                        )
+                    conn.commit()
+
+            return ExecutionView(
+                execution_key=exec_key,
+                proposal_id=prop_id,
+                incident_id=inc_id,
+                state=receipt.result,
+                payload_digest=digest,
+                expected_revision=expected_rev,
+                payload=payload,
+                claimed_at=claimed_at,
+                dispatched_at=dispatched_at,
+                receipt=receipt,
+                reconciled=True,
+                error=None,
+            )
+        elif resp.status_code == 404:
+            # Receipt not found in sandbox
+            return ExecutionView(
+                execution_key=exec_key,
+                proposal_id=prop_id,
+                incident_id=inc_id,
+                state=exec_state,
+                payload_digest=digest,
+                expected_revision=expected_rev,
+                payload=payload,
+                claimed_at=claimed_at,
+                dispatched_at=dispatched_at,
+                receipt=receipt_obj,
+                reconciled=False,
+                error="Receipt not found in sandbox",
+            )
+        else:
+            return ExecutionView(
+                execution_key=exec_key,
+                proposal_id=prop_id,
+                incident_id=inc_id,
+                state=exec_state,
+                payload_digest=digest,
+                expected_revision=expected_rev,
+                payload=payload,
+                claimed_at=claimed_at,
+                dispatched_at=dispatched_at,
+                receipt=receipt_obj,
+                reconciled=False,
+                error=f"Sandbox returned status {resp.status_code}: {resp.text}",
+            )
+    except Exception as exc:
+        return ExecutionView(
+            execution_key=exec_key,
+            proposal_id=prop_id,
+            incident_id=inc_id,
+            state=exec_state,
+            payload_digest=digest,
+            expected_revision=expected_rev,
+            payload=payload,
+            claimed_at=claimed_at,
+            dispatched_at=dispatched_at,
+            receipt=receipt_obj,
+            reconciled=False,
+            error=str(exc),
+        )

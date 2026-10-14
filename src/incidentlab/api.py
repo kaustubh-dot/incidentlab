@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,7 +19,13 @@ from incidentlab.approvals import ApprovalError, claim_execution, decide_proposa
 from incidentlab.config import Settings
 from incidentlab.db import get_control_connection
 from incidentlab.events import read_events, record_event
-from incidentlab.executor import CheckoutError, submit_checkout, wait_for_order_fulfillment
+from incidentlab.executor import (
+    CheckoutError,
+    execute_claim,
+    reconcile_execution,
+    submit_checkout,
+    wait_for_order_fulfillment,
+)
 from incidentlab.graph import run_investigation
 from incidentlab.schemas import (
     ApprovalDecision,
@@ -30,10 +38,15 @@ from incidentlab.schemas import (
     Diagnosis,
     EventPage,
     EvidenceItem,
+    ExecutionClaim,
+    ExecutionView,
     IncidentView,
     Proposal,
     StartIncident,
 )
+from incidentlab.verifier import verify_checkout
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_settings(request: Request) -> Settings:
@@ -429,11 +442,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings=cfg,
             )
             if decision_payload.decision == "approve":
-                await claim_execution(
+                claim = await claim_execution(
                     incident_id=incident_id,
                     proposal_id=decision_payload.proposal_id,
                     settings=cfg,
                 )
+
+                if claim.state == "claimed":
+
+                    async def _dispatch_and_verify(
+                        c: ExecutionClaim, inc_id: UUID, s: Settings
+                    ):
+                        try:
+                            receipt = await execute_claim(c, settings=s)
+                            if receipt.result == "applied":
+                                req_key = uuid4()
+                                await verify_checkout(inc_id, req_key, settings=s)
+                        except Exception as err:
+                            logger.error("Background repair/verify failed: %s", err)
+
+                    asyncio.create_task(_dispatch_and_verify(claim, incident_id, cfg))
+
             return approval_view
         except ApprovalError as err:
             raise HTTPException(
@@ -456,6 +485,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "error": {
                         "code": "approval_failed",
                         "message": f"Failed to record approval decision: {exc}",
+                        "request_id": None,
+                        "retryable": False,
+                    }
+                },
+            ) from exc
+
+    @app.post(
+        "/api/v1/incidents/{incident_id}/reconcile",
+        response_model=ExecutionView,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def reconcile_incident(
+        incident_id: UUID,
+        req: Request,
+    ) -> ExecutionView:
+        cfg = req.app.state.settings
+        with get_control_connection(cfg) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT execution_key
+                    FROM control.executions
+                    WHERE incident_id = %s
+                    ORDER BY claimed_at DESC
+                    LIMIT 1
+                    """,
+                    (incident_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail={
+                            "error": {
+                                "code": "execution_not_found",
+                                "message": f"No execution found for incident {incident_id}",
+                                "request_id": None,
+                                "retryable": False,
+                            }
+                        },
+                    )
+                exec_key = row[0]
+
+        try:
+            view = await reconcile_execution(exec_key, settings=cfg)
+            if view.receipt and view.receipt.result == "applied":
+                with get_control_connection(cfg) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT state FROM control.incidents WHERE id = %s",
+                            (incident_id,),
+                        )
+                        inc_row = cur.fetchone()
+                        if inc_row and inc_row[0] in ("verifying", "execution_unknown"):
+
+                            async def _verify_bg(inc_id: UUID, s: Settings):
+                                try:
+                                    await verify_checkout(inc_id, uuid4(), settings=s)
+                                except Exception as err:
+                                    logger.error(
+                                        "Reconcile background verification failed: %s",
+                                        err,
+                                    )
+
+                            asyncio.create_task(_verify_bg(incident_id, cfg))
+
+            return view
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": {
+                        "code": "reconcile_failed",
+                        "message": f"Failed to reconcile execution: {exc}",
                         "request_id": None,
                         "retryable": False,
                     }

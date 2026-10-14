@@ -355,6 +355,38 @@ def _claim_execution_tx(
                 "incident_cancelled", "Incident cancellation has been requested", 409
             )
 
+        # 2. Check if claim already exists (idempotent / exactly one execution key)
+        cur.execute(
+            """
+            SELECT execution_key, state, payload_digest, expected_revision,
+                   claimed_at, dispatched_at, receipt
+            FROM control.executions
+            WHERE proposal_id = %s
+            FOR UPDATE
+            """,
+            (proposal_id,),
+        )
+        existing_claim = cur.fetchone()
+        if existing_claim:
+            cur.execute(
+                "SELECT payload FROM control.proposals WHERE id = %s",
+                (proposal_id,),
+            )
+            p_row = cur.fetchone()
+            parsed_payload = _parse_repair_payload(p_row[0]) if p_row else None
+            return ExecutionClaim(
+                execution_key=existing_claim[0],
+                proposal_id=proposal_id,
+                incident_id=incident_id,
+                state=existing_claim[1],
+                payload_digest=existing_claim[2],
+                expected_revision=existing_claim[3],
+                payload=parsed_payload,
+                claimed_at=existing_claim[4],
+                dispatched_at=existing_claim[5],
+                receipt=existing_claim[6],
+            )
+
         if inc_state not in ("approved", "executing"):
             raise ApprovalError(
                 "incident_not_approved",
@@ -362,7 +394,7 @@ def _claim_execution_tx(
                 409,
             )
 
-        # 2. Lock proposal
+        # 3. Lock proposal
         cur.execute(
             """
             SELECT id, payload, payload_digest, target_revision, expires_at
@@ -417,34 +449,7 @@ def _claim_execution_tx(
                 409,
             )
 
-        # 5. Check if claim already exists (idempotent / exactly one execution key)
-        cur.execute(
-            """
-            SELECT execution_key, state, payload_digest, expected_revision,
-                   claimed_at, dispatched_at, receipt
-            FROM control.executions
-            WHERE proposal_id = %s
-            FOR UPDATE
-            """,
-            (proposal_id,),
-        )
-        existing_claim = cur.fetchone()
-        if existing_claim:
-            parsed_payload = _parse_repair_payload(stored_payload)
-            return ExecutionClaim(
-                execution_key=existing_claim[0],
-                proposal_id=proposal_id,
-                incident_id=incident_id,
-                state=existing_claim[1],
-                payload_digest=existing_claim[2],
-                expected_revision=existing_claim[3],
-                payload=parsed_payload,
-                claimed_at=existing_claim[4],
-                dispatched_at=existing_claim[5],
-                receipt=existing_claim[6],
-            )
-
-        # 6. Current revision precheck
+        # 5. Current revision precheck
         if current_rev is not None:
             if current_rev != expected_revision:
                 cur.execute(

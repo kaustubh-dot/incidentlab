@@ -110,6 +110,41 @@ def verify_write_token(
     return "write"
 
 
+def verify_read_or_write_token(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> str:
+    settings: SandboxSettings = request.app.state.settings
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": {
+                    "code": "unauthorized",
+                    "message": "Valid read or write bearer token required",
+                    "request_id": None,
+                    "retryable": False,
+                }
+            },
+        )
+    token = authorization[len("Bearer ") :].strip()
+    if hmac.compare_digest(token, settings.il_sandbox_read_token):
+        return "read"
+    if hmac.compare_digest(token, settings.il_sandbox_write_token):
+        return "write"
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "error": {
+                "code": "unauthorized",
+                "message": "Invalid read or write bearer token",
+                "request_id": None,
+                "retryable": False,
+            }
+        },
+    )
+
+
 def verify_admin_token(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -335,7 +370,7 @@ def create_sandbox_app(settings: SandboxSettings | None = None) -> FastAPI:
     async def get_repair(
         execution_key: UUID,
         request: Request,
-        _auth: str = Depends(verify_write_token),
+        _auth: str = Depends(verify_read_or_write_token),
     ):
         settings: SandboxSettings = request.app.state.settings
         with get_sandbox_connection(settings.il_sandbox_database_url) as conn:

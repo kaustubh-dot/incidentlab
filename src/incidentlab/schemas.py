@@ -146,6 +146,21 @@ class RepairReceipt(BaseSchema):
     recorded_at: datetime
 
 
+class ExecutionView(BaseSchema):
+    execution_key: UUID
+    proposal_id: UUID
+    incident_id: UUID
+    state: Literal["claimed", "dispatching", "applied", "precondition_failed", "unknown"]
+    payload_digest: str
+    expected_revision: int
+    payload: RepairPayload
+    claimed_at: datetime
+    dispatched_at: datetime | None = None
+    receipt: RepairReceipt | None = None
+    reconciled: bool = False
+    error: str | None = None
+
+
 class VerificationResult(BaseSchema):
     verdict: Literal["pass", "fail", "error"]
     request_id: UUID

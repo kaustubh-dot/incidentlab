@@ -232,7 +232,21 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Decision `reject` sets state to `rejected` and produces exactly zero execution claims.
     - Execution claims enforce exactly one claim per proposal (`UNIQUE(proposal_id)` in `control.executions`). Precheck queries current sandbox target revision before dispatching.
     - Async HTTP I/O (`check_target_revision`) performed outside database transaction to prevent `idle in transaction` lock contention.
-  - **Next action:** IL-T08 (execute the finite repair and independently verify checkout).
+- **IL-T08 (2026-10-14):**
+  - **Commit:** `feat: execute approved repair and verify functional recovery`
+  - **Files:** `src/incidentlab/schemas.py`, `src/incidentlab/sandbox/api.py`, `src/incidentlab/executor.py`, `src/incidentlab/verifier.py`, `src/incidentlab/approvals.py`, `src/incidentlab/api.py`, `src/incidentlab/cli.py`, `tests/test_execution.py`, `tests/test_approval.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_execution.py` (exit 0, 8 passed)
+    - `docker run --rm -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 51 passed, 1 deselected)
+    - `docker run --rm -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests --network incidentlab-test_default --env-file .env -e IL_MODEL_TIMEOUT_SECONDS=300 incidentlab-eval:local python -m incidentlab.cli smoke-demo --family inventory_config --approval approve` (exit 0, real Ollama CPU investigation, proposal generation, owner approval, single repair dispatch with receipt result=applied, and independent checkout verification verdict=pass)
+  - **Observed facts:**
+    - `execute_claim` validates payload allowlist (`set_inventory_endpoint`), pre-dispatch cancellation, and records `dispatching` state before issuing exactly one HTTP POST.
+    - Zero automatic repair retries: errors/timeouts transition to `unknown` and trigger read-only receipt lookup via `reconcile_execution` (`GET /repairs/{execution_key}`).
+    - Sandbox locks target, validates expected revision and payload digest, updates config, and commits durable repair receipt in one atomic transaction.
+    - Verification executes via `verify_checkout`: submits a brand new fake order via `submit_checkout`, polls up to 10 seconds at 250ms intervals, verifies `fulfilled` status, appends `verification` kind evidence to `control.evidence`, and transitions incident to `verified_recovered` on pass or `verification_failed` on fail.
+    - `green_health_is_not_recovery` verified: HTTP 200 health check on broken target does not satisfy recovery.
+  - **Next action:** IL-T09 (build thin owner UI and live E2E).
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
@@ -244,3 +258,4 @@ At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all
 3. Confirm prerequisite evidence and phase authorization. Prepare the concrete review if absent; do not assume approval.
 4. Execute only the bounded task. Ask briefly whether it can be simpler without losing required behavior, and follow the minimum checks rather than creating another review loop.
 5. Update this ledger/docs, commit the meaningful checkpoint, and state the exact next action. At phase end stop for review; after accepted completion stop building.
+
