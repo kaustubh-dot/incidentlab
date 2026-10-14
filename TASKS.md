@@ -179,7 +179,24 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Diagnostics (`/diagnostics/config`, `/diagnostics/logs`, `/diagnostics/probe`) expose operational failure state without leaking the scenario label `inventory_config`.
     - Owner demo endpoint `POST /api/v1/demo/fault` verifies owner bearer token, refuses mutation while an incident is nonterminal, and forwards to sandbox operator route.
     - CLI `seed` subcommand generates pre-injection healthy traffic before applying fault to demonstrate log filtering.
-  - **Next action:** IL-T05 (connect read-only MCP and keyword retrieval).
+  - **Next action:** IL-T05 (connect read-only MCP and keyword retrieval) completed. Next action: IL-T06 (persist bounded agent reasoning and an immutable proposal).
+
+- **IL-T05 (2026-10-14):**
+  - **Commit:** `feat: add read-only MCP evidence and runbook retrieval`
+  - **Files:** `src/incidentlab/mcp_server.py`, `src/incidentlab/mcp_client.py`, `src/incidentlab/retrieval.py`, `src/incidentlab/cli.py`, `tests/test_mcp_boundary.py`, `tests/test_retrieval.py`, `data/runbooks/worker.md`, `data/runbooks/upstream.md`, `tests/conftest.py`, `tests/test_sandbox_flow.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `uv run pytest tests/test_mcp_boundary.py tests/test_retrieval.py -m 'not integration'` (exit 0, 3 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_mcp_boundary.py tests/test_retrieval.py` (exit 0, 5 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local python -m incidentlab.cli index-runbooks` (exit 0, 15 sections indexed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 31 passed)
+  - **Observed facts:**
+    - Read-only MCP server registers exactly four tools: `get_health`, `get_logs`, `get_config`, `probe_checkout`.
+    - Child process environment strictly receives read authority only (`IL_SANDBOX_READ_TOKEN`, `IL_SANDBOX_BASE_URL`), with write/admin/db tokens excluded.
+    - Stdio MCP client transport validates allowed tool names, bounds arguments, executes tools over JSON-RPC stdio streams, and wraps results into typed `EvidenceItem` records.
+    - PostgreSQL full-text search indexes 15 runbook sections across 3 runbooks into `control.runbook_chunks` and returns top 3 ranked citations using `ts_rank_cd`.
+    - CLI `index-runbooks` command successfully indexes runbook corpus.
+  - **Next action:** IL-T06 (persist bounded agent reasoning and an immutable proposal).
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
 

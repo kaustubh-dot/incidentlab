@@ -293,7 +293,7 @@ def main():
 
     args = parser.parse_args()
 
-    future_cmds = ("index-runbooks", "smoke-demo", "resolve-unknown")
+    future_cmds = ("smoke-demo", "resolve-unknown")
     if args.command == "qualify":
         result = qualify_runtime(args.output)
         print(json.dumps(result, indent=2))
@@ -418,6 +418,17 @@ def main():
                 return 0
 
         sys.exit(asyncio.run(run_seed()))
+    elif args.command == "index-runbooks":
+        from incidentlab.db import get_control_connection
+        from incidentlab.retrieval import index_runbooks
+
+        settings = Settings.from_env()
+        with get_control_connection(settings) as conn:
+            runbooks_path = Path("data/runbooks")
+            count = index_runbooks(conn, runbooks_dir=runbooks_path)
+            sys.stderr.write(f"Indexed {count} runbook sections successfully.\n")
+            print(json.dumps({"status": "indexed", "sections_indexed": count}, indent=2))
+            sys.exit(0)
     elif args.command in future_cmds:
         sys.stderr.write(
             f"Command '{args.command}' belongs to a later task/phase and is not yet implemented.\n"

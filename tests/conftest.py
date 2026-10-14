@@ -27,3 +27,10 @@ def mock_env_mapping():
 @pytest.fixture
 def test_settings(mock_env_mapping):
     return Settings.from_mapping(mock_env_mapping)
+
+
+@pytest.fixture
+def live_settings():
+    """Load settings from current environment (used in integration runs)."""
+    return Settings.from_env()
+

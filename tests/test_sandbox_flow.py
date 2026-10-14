@@ -9,17 +9,10 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from incidentlab.config import Settings
 from incidentlab.db import get_sandbox_connection
 from incidentlab.executor import submit_checkout, wait_for_order_fulfillment
 from incidentlab.sandbox.schemas import CheckoutAccepted, OrderView
 from incidentlab.sandbox.worker import worker_tick
-
-
-@pytest.fixture
-def live_settings():
-    """Load settings from current environment (used in integration runs)."""
-    return Settings.from_env()
 
 
 @pytest.fixture
