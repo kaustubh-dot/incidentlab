@@ -10,9 +10,9 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T07: bound owner approval and atomic claim.
+**Next action:** Execute IL-T10: worker recovery and maintenance escalation.
 
-**Current blockers:** None. Docker and Compose installed; PostgreSQL container and schema migrations running and verified in `incidentlab-test`.
+**Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
 **Execution constraint:** Follow `AGENTS.md` on simplicity during coding. Stop once mapped acceptance and minimum verification pass. Do not add a framework, service, test expansion, repeated review, or optimization without an unmet active requirement or observed issue.
 
@@ -41,8 +41,8 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | verified_complete | 15 runbook chunks indexed; 5 passed in `tests/test_mcp_boundary.py` and `tests/test_retrieval.py` |
 | IL-T06 | Bounded agent and durable proposal | IL-03, IL-05, IL-06, IL-07, IL-10, IL-11 | IL-T05 | verified_complete | `tests/test_agent_contract.py` passed; live model test produced immutable proposal in `awaiting_approval` with zero sandbox effect |
 | IL-T07 | Bound approval and atomic claim | IL-07, IL-08, IL-11 | P1 accepted; P2 approved; IL-T06 | verified_complete | `tests/test_approval.py` passed; 9 focused tests, duplicate idempotency, reject 0 claims, stale revision rejected |
-| IL-T08 | Repair, receipt and functional verification | IL-08, IL-09, IL-11 | IL-T07 | pending | Not run |
-| IL-T09 | Thin UI and first complete live E2E | IL-01, IL-03, IL-07, IL-08, IL-09, IL-10, IL-14 | IL-T08 | pending | Not run |
+| IL-T08 | Repair, receipt and functional verification | IL-08, IL-09, IL-11 | IL-T07 | verified_complete | `tests/test_execution.py` passed (8 passed); receipt reconciliation, independent checkout verifier, green health is not recovery |
+| IL-T09 | Thin UI and first complete live E2E | IL-01, IL-03, IL-07, IL-08, IL-09, IL-10, IL-14 | IL-T08 | verified_complete | Built React 18 UI; live model E2E `tests/test_end_to_end.py` verified recovery and rejection (685s) |
 | IL-T10 | Worker recovery and maintenance escalation | IL-02, IL-03, IL-08, IL-09 | P2 accepted; P3 approved; IL-T09 | pending | Not run |
 | IL-T11 | Runbook grounding and bounded context | IL-03, IL-06, IL-12 | IL-T10 | pending | Not run |
 | IL-T12 | Restart/cancel/unknown outcome integrity | IL-07, IL-08, IL-09, IL-11 | IL-T10, IL-T11 | pending | Not run |
@@ -65,9 +65,9 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | Planning → P0 | Scope/contracts/evaluation/plan | Authorized in batch (2026-10-13) | In progress | Authorized in batch (P1 authorized) |
 | P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Verified complete (qualification.json, 23 passed tests, smoke-checkout fulfilled) | Authorized in batch (P2 authorized) |
 | P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Verified complete (48f25cd; 34 passed tests, 15 chunks indexed, smoke-checkout fulfilled, subagent audit PASS) | Authorized in batch (P3 authorized) |
-| P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P4 authorized) |
-| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
-| P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P6 authorized) |
+| P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Verified complete (8becaab; 51 offline tests pass, npm ci/typecheck/build pass, live E2E pass, subagent audit PASS) | Authorized in batch (P3 authorized) |
+| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P4 authorized) |
+| P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
 | P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 | P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 
