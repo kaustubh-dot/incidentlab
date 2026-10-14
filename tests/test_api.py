@@ -164,6 +164,15 @@ def test_event_ordering_and_active_incident_constraint():
             assert [e.seq for e in page.events] == [1, 2, 3]
             assert page.has_more is False
 
+            # Verify cryptographic SHA-256 prev_hash chain integrity
+            ev1, ev2, ev3 = page.events
+            assert ev1.payload["prev_hash"] == "0" * 64
+            assert ev1.payload["event_hash"] is not None
+            assert ev2.payload["prev_hash"] == ev1.payload["event_hash"]
+            assert ev2.payload["event_hash"] is not None
+            assert ev3.payload["prev_hash"] == ev2.payload["event_hash"]
+            assert ev3.payload["event_hash"] is not None
+
             # Complete inc1 and verify a new active incident can now be created
             cur.execute(
                 "UPDATE control.incidents SET state = 'verified_recovered' WHERE id = %s",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -48,12 +49,36 @@ def append_event(
     duration_ms: int | None = None,
     token_count: int | None = None,
 ) -> int:
-    """Append one ordered event to the incident timeline under row lock."""
+    """Append one ordered event to the incident timeline under row lock with SHA-256 hash chain."""
     # Ensure incident row is locked for atomic monotonic sequence allocation
     cursor.execute(
         "SELECT id FROM control.incidents WHERE id = %s FOR UPDATE",
         (str(incident_id),),
     )
+
+    # Retrieve latest event payload to establish cryptographic prev_hash chain
+    cursor.execute(
+        """
+        SELECT payload FROM control.events
+        WHERE incident_id = %s
+        ORDER BY seq DESC
+        LIMIT 1
+        """,
+        (str(incident_id),),
+    )
+    prev_row = cursor.fetchone()
+    if prev_row is None:
+        prev_hash = "0" * 64
+    else:
+        prev_payload = prev_row[0]
+        if isinstance(prev_payload, str):
+            prev_payload = json.loads(prev_payload)
+        if isinstance(prev_payload, dict) and "event_hash" in prev_payload:
+            prev_hash = prev_payload["event_hash"]
+        else:
+            prev_hash = hashlib.sha256(
+                json.dumps(prev_payload, sort_keys=True).encode("utf-8")
+            ).hexdigest()
 
     cursor.execute(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM control.events WHERE incident_id = %s",
@@ -62,6 +87,15 @@ def append_event(
     next_seq = cursor.fetchone()[0]
 
     safe_payload = redact_sensitive_data(payload)
+    if not isinstance(safe_payload, dict):
+        safe_payload = {"data": safe_payload}
+
+    safe_payload["prev_hash"] = prev_hash
+    event_hash = hashlib.sha256(
+        json.dumps(safe_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    safe_payload["event_hash"] = event_hash
+
     now = datetime.now(UTC)
 
     cursor.execute(

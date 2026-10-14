@@ -221,9 +221,10 @@ async def test_executor_helper_direct(live_settings):
     assert order.request_id == accepted.request_id
 
 
-# --- Unit / DB Level Tests ---
+# --- DB-Level Integration Tests ---
 
 
+@pytest.mark.integration
 def test_worker_tick_paused(live_settings):
     """When worker_running is false in target_state, worker_tick fulfills 0 orders."""
     dsn = live_settings.il_sandbox_database_url

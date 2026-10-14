@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T03: complete healthy fake checkout, local inventory dependency route, sandbox worker loop fulfilling orders to `fulfilled`, owner demo checkout route, and CLI `smoke-checkout`.
+**Next action:** P0 review-and-fix gate completed. Ready for P1 start.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container and schema migrations running and verified in `incidentlab-test`.
 
@@ -36,7 +36,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 |---|---|---|---|---|---|
 | IL-T01 | Qualified/pinned runtime and model probe | IL-05, IL-11, IL-13, IL-14 | P0 start approval | verified_complete | `artifacts/qualification.json`; 8 passed in `tests/test_model_contract.py` |
 | IL-T02 | Storage, roles, owner API boundary | IL-07, IL-10, IL-11, IL-14 | IL-T01 | verified_complete | `migrations/001_initial.sql` applied; 16 passed in `tests/test_api.py` and `tests/test_model_contract.py` |
-| IL-T03 | Actual healthy checkout and worker fulfillment | IL-01, IL-09, IL-14 | IL-T02 | pending | Not run |
+| IL-T03 | Actual healthy checkout and worker fulfillment | IL-01, IL-09, IL-14 | IL-T02 | verified_complete | 23 passed in `tests/`; smoke-checkout fulfilled in 0.33s |
 | IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | pending | Not run |
 | IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | pending | Not run |
 | IL-T06 | Bounded agent and durable proposal | IL-03, IL-05, IL-06, IL-07, IL-10, IL-11 | IL-T05 | pending | Not run |
@@ -63,7 +63,7 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | Gate | Required review | Start approval | Completion evidence | User acceptance / next phase approval |
 |---|---|---|---|---|
 | Planning → P0 | Scope/contracts/evaluation/plan | Authorized in batch (2026-10-13) | In progress | Authorized in batch (P1 authorized) |
-| P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P2 authorized) |
+| P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Verified complete (qualification.json, 23 passed tests, smoke-checkout fulfilled) | Authorized in batch (P2 authorized) |
 | P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P3 authorized) |
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P4 authorized) |
 | P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
