@@ -43,9 +43,9 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T07 | Bound approval and atomic claim | IL-07, IL-08, IL-11 | P1 accepted; P2 approved; IL-T06 | verified_complete | `tests/test_approval.py` passed; 9 focused tests, duplicate idempotency, reject 0 claims, stale revision rejected |
 | IL-T08 | Repair, receipt and functional verification | IL-08, IL-09, IL-11 | IL-T07 | verified_complete | `tests/test_execution.py` passed (8 passed); receipt reconciliation, independent checkout verifier, green health is not recovery |
 | IL-T09 | Thin UI and first complete live E2E | IL-01, IL-03, IL-07, IL-08, IL-09, IL-10, IL-14 | IL-T08 | verified_complete | Built React 18 UI; live model E2E `tests/test_end_to_end.py` verified recovery and rejection (685s) |
-| IL-T10 | Worker recovery and maintenance escalation | IL-02, IL-03, IL-08, IL-09 | P2 accepted; P3 approved; IL-T09 | pending | Not run |
-| IL-T11 | Runbook grounding and bounded context | IL-03, IL-06, IL-12 | IL-T10 | pending | Not run |
-| IL-T12 | Restart/cancel/unknown outcome integrity | IL-07, IL-08, IL-09, IL-11 | IL-T10, IL-T11 | pending | Not run |
+| IL-T10 | Worker recovery and maintenance escalation | IL-02, IL-03, IL-08, IL-09 | P2 accepted; P3 approved; IL-T09 | verified_complete | Commit e9abe58; resume_order_worker added to allowlist, worker_paused verified live, upstream_maintenance escalated with repair=None |
+| IL-T11 | Runbook grounding and bounded context | IL-03, IL-06, IL-12 | IL-T10 | verified_complete | Commit 76afdb3; 12 dev cases frozen in evals/cases/dev.jsonl, context budget test (6000 tokens) passed, chunk bounds enforced (<200 tokens) |
+| IL-T12 | Restart/cancel/unknown outcome integrity | IL-07, IL-08, IL-09, IL-11 | IL-T10, IL-T11 | verified_complete | Commit 3b75e50; tests/test_recovery.py (7 passed), ack loss crash harness verified repair_post_count==1, resolve-unknown CLI closes unresolved with effect_unknown=true, releases one-active constraint |
 | IL-T13 | Frozen cases, isolated runner and scoring | IL-11, IL-12 | P3 accepted; P4 approved; IL-T12 | pending | Not run |
 | IL-T14 | Fixed-versus-agent development comparison | IL-03, IL-05, IL-06, IL-12 | IL-T13 | pending | Not run |
 | IL-T15 | Essential security regressions and offline CI | IL-04, IL-07, IL-08, IL-09, IL-11, IL-14 | IL-T14 | pending | Not run |
@@ -66,7 +66,7 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Verified complete (qualification.json, 23 passed tests, smoke-checkout fulfilled) | Authorized in batch (P2 authorized) |
 | P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Verified complete (48f25cd; 34 passed tests, 15 chunks indexed, smoke-checkout fulfilled, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Verified complete (8becaab; 51 offline tests pass, npm ci/typecheck/build pass, live E2E pass, subagent audit PASS) | Authorized in batch (P3 authorized) |
-| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P4 authorized) |
+| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Verified complete (3b75e50; 66 offline tests pass, live worker recovery and maintenance escalation verified, ack loss crash safety proven, resolve-unknown CLI operational) | Authorized in batch (P4 authorized) |
 | P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
 | P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 | P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
@@ -264,7 +264,49 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Approval panel displays immutable proposal ID, action (`set_inventory_endpoint`), endpoint key (`inventory-local`), target revision, payload digest, and countdown timer.
     - Full end-to-end recovery verified: healthy checkout fulfilled -> fault injected (`inventory_config`) -> checkout failure observed -> agent investigation diagnosed root cause -> owner approved proposal -> deterministic repair applied -> independent verifier checkout fulfilled brand-new order (`verdict="pass"`).
     - Full end-to-end rejection verified: fault injected -> checkout failure observed -> agent investigation -> owner rejected proposal -> incident state transitioned to `rejected` -> reconcile verified exactly zero execution claims created (`404 execution_not_found`).
-  - **Next action:** Phase P2 Review-and-Fix gate subagent audit.
+  - **Next action:** Phase P2 Review-and-Fix gate subagent audit (completed, verdict PASS in commit `2b7412b`).
+
+- **IL-T10 (2026-10-14):**
+  - **Commit:** `feat: complete worker recovery and maintenance escalation` (`e9abe58`)
+  - **Files:** `src/incidentlab/sandbox/service.py`, `src/incidentlab/sandbox/api.py`, `src/incidentlab/executor.py`, `src/incidentlab/graph.py`, `src/incidentlab/cli.py`, `frontend/src/App.tsx`, `tests/test_execution.py`, `tests/test_sandbox_flow.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_execution.py tests/test_sandbox_flow.py` (exit 0, 22 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local python -m incidentlab.cli smoke-demo --family worker_paused --approval approve` (exit 0, live Ollama Qwen3:8B diagnosed paused worker, proposed `resume_order_worker`, executed repair, and verified recovery with newly fulfilled checkout order)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local python -m incidentlab.cli smoke-demo --family upstream_maintenance --approval interactive` (exit 0, diagnosed upstream maintenance, escalated with repair=None and zero repair dispatch)
+  - **Observed facts:**
+    - Allowlist extended to exactly the two allowed repairs: `set_inventory_endpoint` and `resume_order_worker`.
+    - `worker_paused` fault injection stops worker fulfillment while checkout 202 is accepted; recovery via `resume_order_worker` resumes worker loop and successfully fulfills stalled order.
+    - `upstream_maintenance` fault injection produces 503 HTTP errors; agent diagnoses maintenance and escalates without proposing a repair action (`repair=None`), generating zero execution claims or receipts.
+
+- **IL-T11 (2026-10-14):**
+  - **Commit:** `feat: validate runbook grounding and bound agent context` (`76afdb3`)
+  - **Files:** `evals/cases/dev.jsonl`, `evals/README.md`, `tests/test_agent_contract.py`, `tests/test_retrieval.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_agent_contract.py tests/test_retrieval.py` (exit 0, 6 passed)
+    - `docker build -t incidentlab-eval:local -f Dockerfile .` (exit 0, successfully built)
+  - **Observed facts:**
+    - 12 development cases frozen in `evals/cases/dev.jsonl` (4 per fault family: clean, noisy, missing, conflicting).
+    - `evals/README.md` created documenting dataset partitioning, synthetic recipe schemas, and grounding constraints.
+    - `test_context_keeps_required_evidence_within_budget` asserts assembled investigation context stays strictly under 6,000 tokens while preserving approval-critical evidence.
+    - `test_chunk_token_bounds` verifies every runbook section across all 3 operational runbooks is strictly `<200` tokens using qualified tokenizer.
+
+- **IL-T12 (2026-10-14):**
+  - **Commit:** `fix: make approval and execution recovery durable` (`3b75e50`)
+  - **Files:** `src/incidentlab/api.py`, `src/incidentlab/cli.py`, `src/incidentlab/executor.py`, `src/incidentlab/graph.py`, `tests/test_approval.py`, `tests/test_recovery.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_recovery.py tests/test_approval.py tests/test_execution.py -m 'not live_model'` (exit 0, 29 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 66 passed, 2 deselected)
+    - `npm --prefix frontend run typecheck && npm --prefix frontend run build` (exit 0, Vite bundle built)
+  - **Observed facts:**
+    - Startup reconciliation (`reconcile_startup`) reconstructs waiting proposals without model rerun or repair dispatch; marks expired proposals if past TTL.
+    - Ack loss crash safety proven: `CrashHarness.apply_then_restart_before_ack()` injected pause/crash after real sandbox transaction commit; recovery via `reconcile_execution` GET confirmed `repair_post_count == 1` with `receipt.result == "applied"` without replaying mutation POST.
+    - Missing receipt handling proven: unreached execution key results in `execution_unknown` state, blocking new incidents via `ix_one_active_incident` unique constraint (409 conflict).
+    - Narrow operator procedure `resolve-unknown --incident <UUID>` implemented and proven: verifies reachability, checks durable receipt, requires quiesce confirmation, non-empty note, and exact typed acknowledgment `ACKNOWLEDGE UNKNOWN <execution-key>`, commits `closed_unknown` with `effect_unknown=true`, records event `execution.closed_unknown`, and releases one-active-incident lock with zero sandbox repair replay.
+    - Pre-dispatch and in-flight cancellation verified: pre-dispatch aborts without sending HTTP POST; in-flight records applied effect and receipt in incident outcome and suppresses independent verification checkout.
+  - **Next action:** Phase P3 Review-and-Fix gate subagent audit.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
