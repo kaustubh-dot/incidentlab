@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T13: build isolated runner, scorer, and frozen splits.
+**Next action:** Execute IL-T16: measure one qualified serving configuration.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -46,9 +46,9 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T10 | Worker recovery and maintenance escalation | IL-02, IL-03, IL-08, IL-09 | P2 accepted; P3 approved; IL-T09 | verified_complete | Commit e9abe58; resume_order_worker added to allowlist, worker_paused verified live, upstream_maintenance escalated with repair=None |
 | IL-T11 | Runbook grounding and bounded context | IL-03, IL-06, IL-12 | IL-T10 | verified_complete | Commit 76afdb3; 12 dev cases frozen in evals/cases/dev.jsonl, context budget test (6000 tokens) passed, chunk bounds enforced (<200 tokens) |
 | IL-T12 | Restart/cancel/unknown outcome integrity | IL-07, IL-08, IL-09, IL-11 | IL-T10, IL-T11 | verified_complete | Commit 3b75e50; tests/test_recovery.py (7 passed), ack loss crash harness verified repair_post_count==1, resolve-unknown CLI closes unresolved with effect_unknown=true, releases one-active constraint |
-| IL-T13 | Frozen cases, isolated runner and scoring | IL-11, IL-12 | P3 accepted; P4 approved; IL-T12 | pending | Not run |
-| IL-T14 | Fixed-versus-agent development comparison | IL-03, IL-05, IL-06, IL-12 | IL-T13 | pending | Not run |
-| IL-T15 | Essential security regressions and offline CI | IL-04, IL-07, IL-08, IL-09, IL-11, IL-14 | IL-T14 | pending | Not run |
+| IL-T13 | Frozen cases, isolated runner and scoring | IL-11, IL-12 | P3 accepted; P4 approved; IL-T12 | verified_complete | Commit `f1c1827`; 12 dev & 18 heldout cases frozen in `evals/manifest.json` (SHA-256 verified), heldout `not_run`, deterministic scorer `evals/score.py`, `tests/test_evaluation.py` (8 passed) |
+| IL-T14 | Fixed-versus-agent development comparison | IL-03, IL-05, IL-06, IL-12 | IL-T13 | verified_complete | Commit `804a527`; `evals/baseline.py` executes exact 4 reads -> retrieval -> 1 schema call; paired dev comparison on 12 cases (`dev_report.json`), 100% relevant coverage, 0 unauthorized repairs, 0 fabricated verifications |
+| IL-T15 | Essential security regressions and offline CI | IL-04, IL-07, IL-08, IL-09, IL-11, IL-14 | IL-T14 | verified_complete | Commit `1f535ee`; `.github/workflows/ci.yml` lean offline CI workflow (Ruff, pytest, typecheck, build), security regressions (secret/tool boundary, prompt injection in logs, unauthorized repair refusal), Docker COPY boundaries verified |
 | IL-T16 | Actual local baseline serving benchmark | IL-05, IL-12, IL-13 | P4 accepted; P5 approved; IL-T15 | pending | Not run |
 | IL-T17 | Clear evidence, authority, failure UI | IL-03, IL-07, IL-09, IL-10, IL-11 | IL-T16 | pending | Not run |
 | IL-T18 | Clean-clone rehearsal and accurate guide | IL-01, IL-10, IL-13, IL-14 | IL-T16, IL-T17 | pending | Not run |
@@ -67,7 +67,7 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Verified complete (48f25cd; 34 passed tests, 15 chunks indexed, smoke-checkout fulfilled, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Verified complete (8becaab; 51 offline tests pass, npm ci/typecheck/build pass, live E2E pass, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Verified complete (3cb2a0a; 66 offline tests pass, live worker recovery & maintenance escalation verified, ack loss crash safety proven, resolve-unknown CLI operational, subagent audit PASS) | Authorized in batch (P4 authorized) |
-| P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
+| P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Verified complete (329b8dc; 77 offline tests pass, 12-case dev report generated with 0 unauthorized repairs / 0 fabricated verifications, held-out frozen and not_run, lean offline CI configured, subagent audit PASS) | Authorized in batch (P5 authorized) |
 | P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 | P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 
@@ -357,7 +357,21 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - `.github/workflows/ci.yml` defines a single lean offline CI workflow running Ruff, frontend typecheck, Vite build, database migrations, sandbox background service, and offline pytest (`-m 'not live_model'`) against PostgreSQL service container.
     - Essential assertion proven: adversarial prompt injection in logs/runbooks cannot add tools to MCP, cannot disclose secret tokens, and an untrusted/compromised model cannot execute repairs without bound owner approval.
     - Docker copy boundaries verified: evaluation image includes tests/evals, runtime image excludes test/eval trees, `.dockerignore` excludes secrets/artifacts/caches.
-  - **Next action:** Phase P4 Review-and-Fix gate audit.
+  - **Phase P4 Review & Fix Audit (2026-10-14):**
+    - Subagent: `6d51f7c7-6f0f-482a-b2eb-0942ce69f7d2`
+    - Tasks audited: IL-T13, IL-T14, IL-T15
+    - Verification commands passed:
+      - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (77 passed, 2 deselected, 1 warning in 10.98s)
+      - `npm --prefix frontend ci` (audited 70 packages, exit 0)
+      - `npm --prefix frontend run typecheck` (zero errors, exit 0)
+      - `npm --prefix frontend run build` (production bundle built in 301ms, exit 0)
+      - `~/.local/bin/uv run ruff check .` (all checks passed, exit 0)
+    - Audit findings:
+      - IL-T13: Frozen recipes in `evals/cases/dev.jsonl` (12 cases) and `evals/cases/heldout.jsonl` (18 cases, 6 per family: 6 inventory_config, 6 worker_paused, 6 upstream_maintenance) with 1-to-1 gold specifications in `evals/gold/` strictly match SHA-256 hashes in `evals/manifest.json`. Deterministic scorer `evals/score.py` verified to check authority binding, allowed actions, verifier fulfilled-order evidence, and citation existence/validity; rejects fabricated verifications, unauthorized repairs, and incorrect repairs. Isolated runner `evals/run.py` resets target cleanly and executes scenarios without leaking gold or fault-labels. Held-out split strictly marked `not_run`.
+      - IL-T14: Fixed diagnostic baseline in `evals/baseline.py` executes exact 4 reads (`get_health` -> `get_logs` -> `get_config` -> `probe_checkout`), top-3 keyword retrieval, and 1 final schema call without fault-label shortcuts. Paired comparison CLI `--compare` in `evals/score.py` executed across all 12 dev cases (`artifacts/evals/dev_report.json`) reporting honest comparisons: 11/12 fixed (91.67%) vs 9/12 agent (75.0%), 100% relevant-section coverage, token metrics, and strict 0 unauthorized repairs and 0 fabricated verifications.
+      - IL-T15: `.github/workflows/ci.yml` defines one lean offline CI job running Ruff, frontend typecheck, Vite build, database migrations, background sandbox service, and offline pytest (`-m 'not live_model'`) against PostgreSQL service container with no live model or paid inference calls. Security/integrity regressions pass offline (secret/tool boundary, prompt injection in logs, unauthorized repair refusal, verifier honesty, evaluation provenance). Docker COPY boundaries verified (eval image includes tests/evals, runtime image excludes test/eval trees, `.dockerignore` excludes secrets/artifacts/caches).
+    - Audit Verdict: **PASS**. P4 gate passed. Transitioning to Phase P5.
+  - **Next action:** Execute IL-T16: measure one qualified serving configuration.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
