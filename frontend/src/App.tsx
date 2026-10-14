@@ -17,6 +17,7 @@ import {
   EvidenceItem,
   IncidentState,
   IncidentView,
+  RepairReceipt,
 } from "./types";
 
 export default function App() {
@@ -37,6 +38,12 @@ export default function App() {
   const [incident, setIncident] = useState<IncidentView | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // Execution receipt & verification details
+  const [executionReceipt, setExecutionReceipt] = useState<RepairReceipt | null>(null);
+
+  // Current timestamp for expiry countdown
+  const [currentTime, setCurrentTime] = useState<number>(Date.now());
 
   // Events & Timeline
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -59,6 +66,23 @@ export default function App() {
       "closed_unknown",
     ].includes(state);
   };
+
+  // Live countdown timer for active proposal
+  useEffect(() => {
+    if (!incident?.proposal || incident.state !== "awaiting_approval") return;
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [incident?.proposal, incident?.state]);
+
+  // Extract execution receipt from events if present
+  useEffect(() => {
+    const receiptEvent = events.find((e) => e.event_type === "execution.receipt");
+    if (receiptEvent && receiptEvent.payload) {
+      setExecutionReceipt(receiptEvent.payload as unknown as RepairReceipt);
+    }
+  }, [events]);
 
   // Poll incident and events
   const pollIncident = useCallback(async () => {
@@ -107,6 +131,7 @@ export default function App() {
     }
     setDemoLoading(true);
     setAuthError(null);
+    setExecutionReceipt(null);
     try {
       const res = await demoReset(token);
       setDemoStatus(`Sandbox reset to healthy baseline (revision ${res.revision})`);
@@ -172,6 +197,7 @@ export default function App() {
     }
     setActionLoading(true);
     setActionError(null);
+    setExecutionReceipt(null);
     setEvents([]);
     nextSeqRef.current = 0;
 
@@ -236,7 +262,10 @@ export default function App() {
     setActionLoading(true);
     setActionError(null);
     try {
-      await reconcileIncident(token, incident.id);
+      const execView = await reconcileIncident(token, incident.id);
+      if (execView.receipt) {
+        setExecutionReceipt(execView.receipt);
+      }
       const updated = await getIncident(token, incident.id);
       setIncident(updated);
     } catch (err: unknown) {
@@ -271,6 +300,19 @@ export default function App() {
 
     return <span className={`badge ${badgeClass}`}>{state.replace("_", " ")}</span>;
   };
+
+  // Expiry calculations for proposal
+  const expiresAtMs = incident?.proposal
+    ? new Date(incident.proposal.expires_at).getTime()
+    : 0;
+  const remainingMs = Math.max(0, expiresAtMs - currentTime);
+  const isExpired = incident?.proposal ? remainingMs <= 0 : false;
+  const remainingSeconds = Math.floor(remainingMs / 1000);
+  const countdownMinutes = Math.floor(remainingSeconds / 60);
+  const countdownSeconds = remainingSeconds % 60;
+  const countdownText = isExpired
+    ? "EXPIRED"
+    : `${countdownMinutes}m ${countdownSeconds.toString().padStart(2, "0")}s`;
 
   return (
     <div className="app-container">
@@ -457,13 +499,30 @@ export default function App() {
 
                 <div className="kv-key">Expires At</div>
                 <div className="kv-val">{new Date(incident.proposal.expires_at).toLocaleString()}</div>
+
+                <div className="kv-key">Expiry Countdown</div>
+                <div className="kv-val">
+                  {isExpired ? (
+                    <span className="badge badge-red">EXPIRED</span>
+                  ) : (
+                    <span className="badge badge-amber" style={{ fontFamily: "var(--font-mono)" }}>
+                      {countdownText} remaining
+                    </span>
+                  )}
+                </div>
               </div>
+
+              {isExpired && (
+                <div className="alert alert-danger" style={{ marginTop: "0.5rem" }}>
+                  Proposal has expired. Approval is disabled.
+                </div>
+              )}
 
               <div className="btn-group">
                 <button
                   className="btn btn-success"
                   onClick={() => handleDecision("approve")}
-                  disabled={actionLoading}
+                  disabled={actionLoading || isExpired}
                 >
                   Approve Repair Action
                 </button>
@@ -479,17 +538,103 @@ export default function App() {
           </section>
         )}
 
+        {/* Execution Receipt Banner */}
+        {executionReceipt && (
+          <section
+            className="panel full-width"
+            style={{
+              borderColor:
+                executionReceipt.result === "applied"
+                  ? "var(--accent-green)"
+                  : "var(--accent-red)",
+            }}
+          >
+            <div
+              className={`alert ${
+                executionReceipt.result === "applied" ? "alert-success" : "alert-danger"
+              }`}
+            >
+              <div style={{ width: "100%" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <strong>Execution Receipt ({executionReceipt.result})</strong>
+                  <span
+                    className={`badge ${
+                      executionReceipt.result === "applied" ? "badge-green" : "badge-red"
+                    }`}
+                  >
+                    {executionReceipt.result.toUpperCase()}
+                  </span>
+                </div>
+                <div className="kv-table" style={{ marginTop: "0.5rem" }}>
+                  <div className="kv-key">Execution Key</div>
+                  <div className="kv-val">{executionReceipt.execution_key}</div>
+
+                  <div className="kv-key">Revision Transition</div>
+                  <div className="kv-val">
+                    rev {executionReceipt.before_revision} &rarr; rev{" "}
+                    {executionReceipt.after_revision}
+                  </div>
+
+                  <div className="kv-key">Payload Digest</div>
+                  <div className="kv-val">{executionReceipt.payload_digest}</div>
+
+                  <div className="kv-key">Recorded At</div>
+                  <div className="kv-val">
+                    {new Date(executionReceipt.recorded_at).toLocaleString()}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
         {/* Outcome & Verification Banner */}
         {incident && incident.state === "verified_recovered" && (
           <section className="panel full-width" style={{ borderColor: "var(--accent-green)" }}>
             <div className="alert alert-success">
-              <div>
+              <div style={{ width: "100%" }}>
                 <strong>Functional Recovery Verified!</strong>
                 <p style={{ marginTop: "0.25rem" }}>
                   Finite repair was executed and committed. The independent verifier successfully
                   submitted a brand-new checkout order and observed fulfillment through the sandbox
                   worker loop.
                 </p>
+                {incident.outcome &&
+                  typeof incident.outcome === "object" &&
+                  "verification" in incident.outcome && (
+                    <div className="kv-table" style={{ marginTop: "0.5rem" }}>
+                      <div className="kv-key">Verdict</div>
+                      <div className="kv-val" style={{ color: "var(--accent-green)", fontWeight: 700 }}>
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).verdict
+                        ).toUpperCase()}
+                      </div>
+                      <div className="kv-key">Verified Order ID</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).order_id
+                        )}
+                      </div>
+                      <div className="kv-key">Observed Status</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).observed_status
+                        )}
+                      </div>
+                      <div className="kv-key">Evidence ID</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).evidence_id
+                        )}
+                      </div>
+                    </div>
+                  )}
               </div>
             </div>
           </section>
@@ -498,12 +643,36 @@ export default function App() {
         {incident && incident.state === "verification_failed" && (
           <section className="panel full-width" style={{ borderColor: "var(--accent-red)" }}>
             <div className="alert alert-danger">
-              <div>
+              <div style={{ width: "100%" }}>
                 <strong>Verification Failed</strong>
                 <p style={{ marginTop: "0.25rem" }}>
                   Repair was applied but independent checkout verification failed to achieve
                   fulfillment within the 10-second deadline.
                 </p>
+                {incident.outcome &&
+                  typeof incident.outcome === "object" &&
+                  "verification" in incident.outcome && (
+                    <div className="kv-table" style={{ marginTop: "0.5rem" }}>
+                      <div className="kv-key">Verdict</div>
+                      <div className="kv-val" style={{ color: "var(--accent-red)", fontWeight: 700 }}>
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).verdict
+                        ).toUpperCase()}
+                      </div>
+                      <div className="kv-key">Order ID</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).order_id || "none"
+                        )}
+                      </div>
+                      <div className="kv-key">Observed Status</div>
+                      <div className="kv-val">
+                        {String(
+                          (incident.outcome.verification as Record<string, unknown>).observed_status
+                        )}
+                      </div>
+                    </div>
+                  )}
               </div>
             </div>
           </section>
