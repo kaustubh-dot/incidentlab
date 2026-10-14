@@ -23,7 +23,7 @@ import httpx
 
 from evals.baseline import run_fixed_investigation
 from evals.score import CaseArtifact
-from incidentlab.approvals import claim_execution, decide_proposal
+from incidentlab.approvals import ApprovalError, claim_execution, decide_proposal
 from incidentlab.config import Settings
 from incidentlab.db import get_control_connection, get_sandbox_connection
 from incidentlab.executor import (
@@ -200,22 +200,45 @@ async def run_case(
 
     # 7. Run investigation
     exec_error = None
-    if approach == "agent":
-        state = await run_investigation(
-            incident_id,
-            settings=settings,
-            evidence_filter=case.evidence_filter,
-        )
-    elif approach == "fixed":
-        state = await run_fixed_investigation(
-            incident_id,
-            settings=settings,
-            evidence_filter=case.evidence_filter,
-        )
-    else:
-        raise ValueError(f"Unknown approach: {approach}")
+    state: dict[str, Any] = {}
+    try:
+        if approach == "agent":
+            state = await run_investigation(
+                incident_id,
+                settings=settings,
+                evidence_filter=case.evidence_filter,
+            )
+        elif approach == "fixed":
+            state = await run_fixed_investigation(
+                incident_id,
+                settings=settings,
+                evidence_filter=case.evidence_filter,
+            )
+        else:
+            raise ValueError(f"Unknown approach: {approach}")
+    except Exception as exc:
+        logger.error("Investigation failed for case %s: %s", case.case_id, exc)
+        exec_error = str(exc)
+        state = {
+            "error": str(exc),
+            "proposal": None,
+            "diagnosis": None,
+            "recent_results": [],
+            "retrieved_runbooks": [],
+        }
+        with get_control_connection(settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'failed', updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (incident_id,),
+                )
+            conn.commit()
 
-    if state.get("error"):
+    if state.get("error") and not exec_error:
         exec_error = state["error"]
 
     # 8. Apply controlled state change if requested (e.g. conflicting state)
@@ -281,28 +304,59 @@ async def run_case(
                     settings=settings,
                 )
                 authority_decision = "approved"
+            except ApprovalError as ae:
+                if (
+                    ae.code in ("target_revision_stale", "stale_revision")
+                    or ae.status_code == 409
+                    or "revision" in str(ae).lower()
+                    or "stale" in str(ae).lower()
+                ):
+                    authority_decision = "reject_stale"
+                else:
+                    raise
             except Exception as ve:
-                if "stale" in str(ve).lower() or "rejected" in str(ve).lower():
-                    authority_decision = "rejected"
+                ve_str = str(ve).lower()
+                if "revision" in ve_str or "stale" in ve_str or "rejected" in ve_str:
+                    authority_decision = "reject_stale"
                 else:
                     raise
 
             if authority_decision == "approved":
-                claim = await claim_execution(
-                    incident_id=incident_id,
-                    proposal_id=proposal_id,
-                    settings=settings,
-                )
-                execution_claim_data = claim.model_dump(mode="json")
-
-                receipt = await execute_claim(claim, settings=settings)
-                execution_receipt_data = receipt.model_dump(mode="json")
-
-                if receipt.result == "applied":
-                    verif = await verify_checkout(
-                        incident_id, request_key=uuid4(), settings=settings
+                try:
+                    claim = await claim_execution(
+                        incident_id=incident_id,
+                        proposal_id=proposal_id,
+                        settings=settings,
                     )
-                    verification_data = verif.model_dump(mode="json")
+                    execution_claim_data = claim.model_dump(mode="json")
+
+                    receipt = await execute_claim(claim, settings=settings)
+                    execution_receipt_data = receipt.model_dump(mode="json")
+
+                    if receipt.result == "applied":
+                        verif = await verify_checkout(
+                            incident_id, request_key=uuid4(), settings=settings
+                        )
+                        verification_data = verif.model_dump(mode="json")
+                except ApprovalError as ce:
+                    ce_codes = ("target_revision_stale", "stale_revision", "precondition_failed")
+                    if (
+                        ce.code in ce_codes
+                        or ce.status_code == 409
+                        or "revision" in str(ce).lower()
+                        or "stale" in str(ce).lower()
+                    ):
+                        authority_decision = "reject_stale"
+                        logger.info("Claim refused as stale: %s", ce)
+                    else:
+                        raise
+                except Exception as ce:
+                    ce_str = str(ce).lower()
+                    if "revision" in ce_str or "stale" in ce_str or "409" in str(ce):
+                        authority_decision = "reject_stale"
+                        logger.info("Claim refused as stale: %s", ce)
+                    else:
+                        raise
 
     # Fetch final incident state and target state after
     with get_control_connection(settings) as conn:
@@ -327,11 +381,30 @@ async def run_case(
 
     tool_calls = []
     total_tokens = 0
+    input_tokens = 0
+    output_tokens = 0
     for ev_name, ev_payload, ev_dur, ev_tokens in event_rows:
         if ev_name == "tool_executed":
             tool_calls.append(ev_payload)
+        if ev_name == "model_called" and isinstance(ev_payload, dict):
+            try:
+                inp = int(ev_payload.get("input_tokens") or 0)
+            except Exception:
+                inp = 0
+            try:
+                out = int(ev_payload.get("output_tokens") or 0)
+            except Exception:
+                out = 0
+            input_tokens += inp
+            output_tokens += out
         if ev_tokens:
-            total_tokens += ev_tokens
+            try:
+                total_tokens += int(ev_tokens)
+            except Exception:
+                pass
+
+    if input_tokens == 0 and total_tokens > 0:
+        input_tokens = total_tokens
 
     target_state_after = {}
     async with httpx.AsyncClient(timeout=10.0) as ac:
@@ -359,6 +432,7 @@ async def run_case(
         failed_order_id=str(failed_order_id) if failed_order_id else None,
         investigation_evidence=state.get("recent_results", []),
         tool_calls=tool_calls,
+        retrieved_runbooks=state.get("retrieved_runbooks", []),
         diagnosis=diagnosis_data,
         proposal=proposal_data,
         authority_decision=authority_decision,
@@ -368,7 +442,11 @@ async def run_case(
         target_state_after=target_state_after,
         verification=verification_data,
         final_incident_state=final_inc_state,
-        tokens={"total_tokens": total_tokens},
+        tokens={
+            "total_tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        },
         durations={"active_seconds": round(active_duration, 3)},
         error=exec_error,
     )

@@ -106,9 +106,21 @@ DIAGNOSIS_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "runbook_id": {"type": "string"},
-                    "source_version": {"type": "string"},
-                    "section_id": {"type": "string"},
+                    "runbook_id": {
+                        "type": "string",
+                        "description": "Runbook ID (e.g. 'inventory', 'worker', 'upstream')",
+                    },
+                    "source_version": {
+                        "type": "string",
+                        "description": "Runbook version string (e.g. '1')",
+                    },
+                    "section_id": {
+                        "type": "string",
+                        "description": (
+                            "Runbook section (e.g. 'repair', 'diagnostics', 'escalation', "
+                            "'symptoms', 'verification')"
+                        ),
+                    },
                 },
                 "required": ["runbook_id", "source_version", "section_id"],
             },
@@ -382,12 +394,18 @@ async def run_investigation(
         turn_start = time.monotonic()
         if is_final_turn:
             # Schema mode without tools
-            model_res: ModelResult = await call_model(
-                messages=messages,
-                tools=[],
-                final_schema=DIAGNOSIS_SCHEMA,
-                settings=settings,
-            )
+            try:
+                model_res: ModelResult = await call_model(
+                    messages=messages,
+                    tools=[],
+                    final_schema=DIAGNOSIS_SCHEMA,
+                    settings=settings,
+                )
+            except Exception as exc:
+                logger.error("Final turn model call failed: %s", exc)
+                return await _terminate_failed(
+                    settings, incident_id, state, f"Final turn model call failed: {exc}"
+                )
             state["model_turn_count"] += 1
             turn_ms = int((time.monotonic() - turn_start) * 1000)
 
@@ -396,7 +414,12 @@ async def run_investigation(
                     conn,
                     incident_id,
                     "model_called",
-                    {"turn": state["model_turn_count"], "mode": "schema"},
+                    {
+                        "turn": state["model_turn_count"],
+                        "mode": "schema",
+                        "input_tokens": model_res.input_tokens,
+                        "output_tokens": model_res.output_tokens,
+                    },
                     duration_ms=turn_ms,
                     token_count=(model_res.input_tokens or 0) + (model_res.output_tokens or 0),
                 )
@@ -410,12 +433,18 @@ async def run_investigation(
                 t for t in MCP_TOOLS
                 if t["function"]["name"] not in masked_tools
             ]
-            model_res = await call_model(
-                messages=messages,
-                tools=active_tools,
-                final_schema=None,
-                settings=settings,
-            )
+            try:
+                model_res = await call_model(
+                    messages=messages,
+                    tools=active_tools,
+                    final_schema=None,
+                    settings=settings,
+                )
+            except Exception as exc:
+                logger.error("Investigation turn model call failed: %s", exc)
+                return await _terminate_failed(
+                    settings, incident_id, state, f"Investigation turn model call failed: {exc}"
+                )
             state["model_turn_count"] += 1
             turn_ms = int((time.monotonic() - turn_start) * 1000)
 
@@ -428,6 +457,8 @@ async def run_investigation(
                         "turn": state["model_turn_count"],
                         "mode": "tools",
                         "calls": len(model_res.tool_calls),
+                        "input_tokens": model_res.input_tokens,
+                        "output_tokens": model_res.output_tokens,
                     },
                     duration_ms=turn_ms,
                     token_count=(model_res.input_tokens or 0) + (model_res.output_tokens or 0),
@@ -483,13 +514,19 @@ async def run_investigation(
                 "diagnosis JSON object matching the required schema now."
             ),
         })
-        model_res = await call_model(
-            messages=messages,
-            tools=[],
-            final_schema=DIAGNOSIS_SCHEMA,
-            settings=settings,
-        )
-        state["diagnosis"] = model_res.diagnosis
+        try:
+            model_res = await call_model(
+                messages=messages,
+                tools=[],
+                final_schema=DIAGNOSIS_SCHEMA,
+                settings=settings,
+            )
+            state["diagnosis"] = model_res.diagnosis
+        except Exception as exc:
+            logger.error("Final diagnosis model call failed: %s", exc)
+            return await _terminate_failed(
+                settings, incident_id, state, f"Final diagnosis model call failed: {exc}"
+            )
 
     # Step 4: Evaluate and persist diagnosis / proposal
     elapsed_ms = int((time.monotonic() - t0) * 1000)

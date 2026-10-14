@@ -28,8 +28,14 @@ def redact_sensitive_data(val: Any) -> Any:
         for k, v in val.items():
             k_lower = str(k).lower()
             if any(s in k_lower for s in SENSITIVE_KEY_SUBSTRINGS):
-                # Don't redact non-sensitive keys that happen to contain substring if safe
-                if k_lower in ("event_kind", "key_name"):
+                if k_lower in (
+                    "event_kind",
+                    "key_name",
+                    "input_tokens",
+                    "output_tokens",
+                    "token_count",
+                    "tokens",
+                ):
                     redacted[k] = redact_sensitive_data(v)
                 else:
                     redacted[k] = "[REDACTED]"

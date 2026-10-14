@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -159,11 +160,24 @@ async def call_model(
     diagnosis: dict[str, Any] | None = None
     raw_content = message.get("content")
     if final_schema and raw_content:
+        clean_content = raw_content.strip()
+        if clean_content.startswith("```"):
+            clean_content = re.sub(r"^```[a-zA-Z]*\n?", "", clean_content)
+            clean_content = re.sub(r"\n?```$", "", clean_content).strip()
         try:
-            diagnosis = json.loads(raw_content)
-        except Exception as exc:
-            msg = f"Failed to parse structured model output as JSON: {exc}"
-            raise InvalidModelOutputError(msg) from exc
+            diagnosis = json.loads(clean_content)
+        except Exception:
+            start_idx = clean_content.find("{")
+            end_idx = clean_content.rfind("}")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                try:
+                    diagnosis = json.loads(clean_content[start_idx : end_idx + 1])
+                except Exception as exc:
+                    msg = f"Failed to parse structured model output as JSON: {exc}"
+                    raise InvalidModelOutputError(msg) from exc
+            else:
+                msg = f"Failed to parse structured model output as JSON: {clean_content[:200]}"
+                raise InvalidModelOutputError(msg)
 
     input_tokens = response.get("prompt_eval_count")
     output_tokens = response.get("eval_count")

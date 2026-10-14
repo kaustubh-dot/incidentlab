@@ -2,7 +2,7 @@
 
 A bounded application-recovery agent: investigate a broken sandbox checkout, propose a specific repair, wait for human approval, and verify the result through actual application behavior.
 
-**Status: Active implementation in progress. Phase P0 (qualified runtime & healthy checkout sandbox), Phase P1 (observable fault injection, MCP tools, runbook FTS indexing, and bounded LangGraph investigation), and Phase P2 (bound owner approval, deterministic repair execution, independent functional verification, and thin owner UI console) are implemented.**
+**Status: Active implementation in progress. Phase P0 (qualified runtime & healthy checkout sandbox), Phase P1 (observable fault injection, MCP tools, runbook FTS indexing, and bounded LangGraph investigation), Phase P2 (bound owner approval, deterministic repair execution, independent functional verification, and thin owner UI console), Phase P3 (worker stall, upstream maintenance escalation, durable recovery, bounded context), and Phase P4 (isolated evaluation harness, paired development baseline report) are implemented.**
 
 Private repository: [kaustubh-dot/incidentlab](https://github.com/kaustubh-dot/incidentlab).
 

@@ -38,18 +38,12 @@ from incidentlab.schemas import (
 logger = logging.getLogger("incidentlab.evals.baseline")
 
 
-async def run_fixed_investigation(
+async def _collect_fixed_state(
     incident_id: UUID,
-    settings: Settings | None = None,
+    settings: Settings,
     evidence_filter: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Execute fixed 4-step diagnostic collection.
-
-    Followed by a single structured schema model call.
-    """
-    if settings is None:
-        settings = Settings.from_env()
-
+) -> tuple[AgentState, float]:
+    """Execute the 4 fixed reads in order, keyword retrieval, and single model turn."""
     masked_tools = set(evidence_filter.get("masked_tools", [])) if evidence_filter else set()
 
     with get_control_connection(settings) as conn:
@@ -182,13 +176,70 @@ async def run_fixed_investigation(
             conn,
             incident_id,
             "model_called",
-            {"turn": 1, "mode": "schema", "approach": "fixed"},
+            {
+                "turn": 1,
+                "mode": "schema",
+                "approach": "fixed",
+                "input_tokens": model_res.input_tokens,
+                "output_tokens": model_res.output_tokens,
+            },
             duration_ms=turn_ms,
             token_count=(model_res.input_tokens or 0) + (model_res.output_tokens or 0),
         )
 
     if model_res.diagnosis:
         state["diagnosis"] = model_res.diagnosis
+
+    return state, t0
+
+
+async def run_fixed_diagnostics(
+    incident_id: UUID,
+    settings: Settings | None = None,
+    evidence_filter: dict[str, Any] | None = None,
+) -> Diagnosis:
+    """Execute fixed 4-step diagnostic collection and return validated Diagnosis.
+
+    Uses health/logs/config/probe in fixed order followed by keyword runbook retrieval
+    and one final schema model call per PRD IL-03, IL-05, IL-06, IL-12 and ROADMAP IL-T14.
+    """
+    if settings is None:
+        settings = Settings.from_env()
+
+    state, _ = await _collect_fixed_state(
+        incident_id=incident_id,
+        settings=settings,
+        evidence_filter=evidence_filter,
+    )
+    raw_diag = state.get("diagnosis")
+    if not raw_diag:
+        raise ValueError(state.get("error") or "Model failed to produce valid structured diagnosis")
+    if raw_diag.get("decision") == "escalate":
+        raw_diag["repair"] = None
+        if raw_diag.get("confidence") != "high" and not raw_diag.get("uncertainty", "").strip():
+            raw_diag["uncertainty"] = (
+                "Incident escalated based on non-repairable or missing conditions."
+            )
+    return Diagnosis.model_validate(raw_diag)
+
+
+async def run_fixed_investigation(
+    incident_id: UUID,
+    settings: Settings | None = None,
+    evidence_filter: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute fixed 4-step diagnostic collection and single structured model call.
+
+    Transitions incident to awaiting_approval or escalated per decision.
+    """
+    if settings is None:
+        settings = Settings.from_env()
+
+    state, t0 = await _collect_fixed_state(
+        incident_id=incident_id,
+        settings=settings,
+        evidence_filter=evidence_filter,
+    )
 
     # Process diagnosis into proposal or escalation
     raw_diag = state.get("diagnosis")
@@ -208,6 +259,13 @@ async def run_fixed_investigation(
                 )
             conn.commit()
         return state
+
+    if raw_diag.get("decision") == "escalate":
+        raw_diag["repair"] = None
+        if raw_diag.get("confidence") != "high" and not raw_diag.get("uncertainty", "").strip():
+            raw_diag["uncertainty"] = (
+                "Incident escalated based on non-repairable or missing conditions."
+            )
 
     try:
         diag = Diagnosis.model_validate(raw_diag)
@@ -274,16 +332,23 @@ async def run_fixed_investigation(
         raise ValueError(f"Unsupported repair action: {action}")
 
     # Fetch latest target revision
-    async with McpSession(settings) as mcp:
-        h_ev = await mcp.call_read_tool(incident_id, "get_health", {})
-        target_revision = h_ev.data.get("revision", 1)
+    cur_rev = None
+    for res in state.get("recent_results", []):
+        data = res.get("data", {})
+        if "target_revision" in data:
+            cur_rev = data["target_revision"]
+            break
+    if cur_rev is None:
+        async with McpSession(settings) as mcp:
+            h_ev = await mcp.call_read_tool(incident_id, "get_health", {})
+            cur_rev = h_ev.data.get("target_revision", 1)
 
     proposal = create_proposal(
         incident_id=incident_id,
         payload=payload,
-        target_revision=target_revision,
+        target_revision=cur_rev,
         evidence_ids=list(state["evidence_ids"]),
-        ttl_seconds=settings.il_proposal_ttl_seconds,
+        ttl_seconds=settings.il_approval_ttl_seconds,
     )
 
     with get_control_connection(settings) as conn:
