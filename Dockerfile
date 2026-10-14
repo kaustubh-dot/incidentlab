@@ -19,6 +19,14 @@ WORKDIR /app
 # Install uv in user home
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /home/incidentlab/.local/bin/uv
 
+# --- Frontend build stage ---
+FROM node:24-slim AS frontend-build
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 # --- Runtime build stage ---
 FROM base AS runtime
 
@@ -28,6 +36,7 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY --chown=incidentlab:incidentlab migrations/ ./migrations/
 COPY --chown=incidentlab:incidentlab data/ ./data/
 COPY --chown=incidentlab:incidentlab src/ ./src/
+COPY --from=frontend-build --chown=incidentlab:incidentlab /build/dist ./frontend/dist/
 RUN uv sync --locked --no-dev
 
 EXPOSE 8000 8001
@@ -42,6 +51,7 @@ RUN uv sync --locked --extra dev --no-install-project
 COPY --chown=incidentlab:incidentlab migrations/ ./migrations/
 COPY --chown=incidentlab:incidentlab data/ ./data/
 COPY --chown=incidentlab:incidentlab src/ ./src/
+COPY --from=frontend-build --chown=incidentlab:incidentlab /build/dist ./frontend/dist/
 COPY --chown=incidentlab:incidentlab tests/ ./tests/
 COPY --chown=incidentlab:incidentlab evals/ ./evals/
 RUN uv sync --locked --extra dev

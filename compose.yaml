@@ -50,6 +50,8 @@ services:
       IL_SANDBOX_BASE_URL: "http://sandbox:8001"
       IL_OLLAMA_BASE_URL: "http://ollama:11434"
       IL_MODEL: ${IL_MODEL:-qwen3:8b}
+      IL_MODEL_TIMEOUT_SECONDS: ${IL_MODEL_TIMEOUT_SECONDS:-300}
+      IL_ACTIVE_DEADLINE_SECONDS: ${IL_ACTIVE_DEADLINE_SECONDS:-600}
       IL_LOG_LEVEL: ${IL_LOG_LEVEL:-INFO}
     depends_on:
       postgres:

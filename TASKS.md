@@ -246,7 +246,25 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Sandbox locks target, validates expected revision and payload digest, updates config, and commits durable repair receipt in one atomic transaction.
     - Verification executes via `verify_checkout`: submits a brand new fake order via `submit_checkout`, polls up to 10 seconds at 250ms intervals, verifies `fulfilled` status, appends `verification` kind evidence to `control.evidence`, and transitions incident to `verified_recovered` on pass or `verification_failed` on fail.
     - `green_health_is_not_recovery` verified: HTTP 200 health check on broken target does not satisfy recovery.
-  - **Next action:** IL-T09 (build thin owner UI and live E2E).
+- **IL-T09 (2026-10-14):**
+  - **Commit:** `feat: deliver first browser-based approved recovery demo`
+  - **Files:** `frontend/package.json`, `frontend/package-lock.json`, `frontend/tsconfig.json`, `frontend/vite.config.ts`, `frontend/index.html`, `frontend/src/App.tsx`, `frontend/src/api.ts`, `frontend/src/types.ts`, `frontend/src/styles.css`, `frontend/src/main.tsx`, `tests/test_end_to_end.py`, `src/incidentlab/api.py`, `Dockerfile`, `compose.yaml`, `README.md`, `tests/conftest.py`.
+  - **Commands executed:**
+    - `npm --prefix frontend ci` (exit 0, dependencies cleanly installed)
+    - `npm --prefix frontend run typecheck` (exit 0, zero TypeScript errors)
+    - `npm --prefix frontend run build` (exit 0, production bundle built with Vite)
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 51 passed, 2 deselected)
+    - `uv run pytest tests/test_end_to_end.py -m live_model -s` (exit 0, 1 passed in 685s against local lab http://127.0.0.1:8000)
+  - **Observed facts:**
+    - React 18/TypeScript/Vite single-page owner console built into `frontend/dist` and served statically by FastAPI at root `/` after `/api/v1` routes.
+    - Owner authentication token is maintained exclusively in React component memory; never stored in `localStorage`, cookies, or logs (IL-11).
+    - Polling loop drains ordered audit events via `GET /api/v1/incidents/{id}/events?after_seq=N` every 1s during active investigation/execution.
+    - Evidence inspector allows owner to inspect exact tool observations and retrieved versioned runbook sections with sanitized payloads.
+    - Approval panel displays immutable proposal ID, action (`set_inventory_endpoint`), endpoint key (`inventory-local`), target revision, payload digest, and countdown timer.
+    - Full end-to-end recovery verified: healthy checkout fulfilled -> fault injected (`inventory_config`) -> checkout failure observed -> agent investigation diagnosed root cause -> owner approved proposal -> deterministic repair applied -> independent verifier checkout fulfilled brand-new order (`verdict="pass"`).
+    - Full end-to-end rejection verified: fault injected -> checkout failure observed -> agent investigation -> owner rejected proposal -> incident state transitioned to `rejected` -> reconcile verified exactly zero execution claims created (`404 execution_not_found`).
+  - **Next action:** Phase P2 Review-and-Fix gate subagent audit.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.

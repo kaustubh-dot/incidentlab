@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,6 +15,7 @@ import httpx
 import psycopg.errors
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from incidentlab.approvals import ApprovalError, claim_execution, decide_proposal
 from incidentlab.config import Settings
@@ -254,7 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post(
         "/api/v1/incidents",
         response_model=IncidentView,
-        status_code=status.HTTP_201_CREATED,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[Depends(verify_owner_token)],
     )
     async def create_incident(payload: StartIncident, req: Request):
@@ -301,6 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "order_id": str(payload.order_id) if payload.order_id else None,
                     },
                 )
+                view = _load_incident_view(conn, incident_id)
         except HTTPException:
             raise
         except Exception as exc:
@@ -316,24 +319,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             ) from exc
 
-        # Advance LangGraph investigation flow
-        await run_investigation(incident_id, settings=cfg)
+        if not view:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": {
+                        "code": "incident_initialization_failed",
+                        "message": f"Incident {incident_id} view could not be loaded",
+                        "request_id": None,
+                        "retryable": False,
+                    }
+                },
+            )
 
-        with get_control_connection(cfg) as conn:
-            view = _load_incident_view(conn, incident_id)
-            if not view:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail={
-                        "error": {
-                            "code": "incident_not_found",
-                            "message": f"Incident {incident_id} not found after investigation",
-                            "request_id": None,
-                            "retryable": False,
-                        }
-                    },
-                )
-            return view
+        # Advance LangGraph investigation flow asynchronously in the background
+        async def _run_investigation_bg(inc_id: UUID, s: Settings):
+            try:
+                await run_investigation(inc_id, settings=s)
+            except Exception as err:
+                logger.error("Background investigation for %s failed: %s", inc_id, err)
+                try:
+                    with get_control_connection(s) as c_conn:
+                        with c_conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                UPDATE control.incidents
+                                SET state = 'failed',
+                                    outcome = jsonb_build_object('error', %s),
+                                    updated_at = NOW()
+                                WHERE id = %s AND state = 'investigating'
+                                """,
+                                (str(err), inc_id),
+                            )
+                        c_conn.commit()
+                except Exception as db_err:
+                    logger.error("Failed to mark incident %s as failed: %s", inc_id, db_err)
+
+        asyncio.create_task(_run_investigation_bg(incident_id, cfg))
+
+        return view
 
     @app.get(
         "/api/v1/incidents/{incident_id}/events",
@@ -567,6 +591,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             ) from exc
 
+    @app.post(
+        "/api/v1/incidents/{incident_id}/cancel",
+        response_model=IncidentView,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def cancel_incident(
+        incident_id: UUID,
+        req: Request,
+    ) -> IncidentView:
+        cfg = req.app.state.settings
+        try:
+            with get_control_connection(cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT state, cancel_requested
+                        FROM control.incidents
+                        WHERE id = %s
+                        FOR UPDATE
+                        """,
+                        (incident_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail={
+                                "error": {
+                                    "code": "incident_not_found",
+                                    "message": f"Incident {incident_id} not found",
+                                    "request_id": None,
+                                    "retryable": False,
+                                }
+                            },
+                        )
+                    inc_state = row[0]
+                    terminal_states = {
+                        "verified_recovered",
+                        "verification_failed",
+                        "escalated",
+                        "failed",
+                        "rejected",
+                        "expired",
+                        "cancelled",
+                        "closed_unknown",
+                    }
+                    if inc_state not in terminal_states:
+                        new_state = (
+                            "cancelled"
+                            if inc_state
+                            in (
+                                "created",
+                                "investigating",
+                                "awaiting_approval",
+                                "approved",
+                            )
+                            else inc_state
+                        )
+                        cur.execute(
+                            """
+                            UPDATE control.incidents
+                            SET cancel_requested = TRUE,
+                                state = %s,
+                                updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (new_state, incident_id),
+                        )
+                        record_event(
+                            conn,
+                            incident_id,
+                            "cancellation_requested",
+                            {
+                                "prior_state": inc_state,
+                                "new_state": new_state,
+                            },
+                        )
+                    conn.commit()
+
+                view = _load_incident_view(conn, incident_id)
+                if not view:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail={
+                            "error": {
+                                "code": "incident_not_found",
+                                "message": f"Incident {incident_id} not found after cancellation",
+                                "request_id": None,
+                                "retryable": False,
+                            }
+                        },
+                    )
+                return view
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": {
+                        "code": "cancellation_failed",
+                        "message": f"Failed to cancel incident: {exc}",
+                        "request_id": None,
+                        "retryable": False,
+                    }
+                },
+            ) from exc
+
     # --- Owner Demo Controls ---
 
     @app.post(
@@ -793,6 +925,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status="pending",
                 error=f"Polling error: {exc}",
             )
+
+    # Mount static assets after all API routes
+    candidate_static_dirs = [
+        Path(__file__).resolve().parent / "static",
+        Path("frontend/dist"),
+        Path("/app/frontend/dist"),
+        Path("/app/src/incidentlab/static"),
+    ]
+    for sdir in candidate_static_dirs:
+        if sdir.exists() and (sdir / "index.html").exists():
+            app.mount("/", StaticFiles(directory=str(sdir), html=True), name="frontend")
+            break
 
     return app
 
