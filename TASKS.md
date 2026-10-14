@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T10: worker recovery and maintenance escalation.
+**Next action:** Execute IL-T13: build isolated runner, scorer, and frozen splits.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -66,7 +66,7 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Verified complete (qualification.json, 23 passed tests, smoke-checkout fulfilled) | Authorized in batch (P2 authorized) |
 | P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Verified complete (48f25cd; 34 passed tests, 15 chunks indexed, smoke-checkout fulfilled, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Verified complete (8becaab; 51 offline tests pass, npm ci/typecheck/build pass, live E2E pass, subagent audit PASS) | Authorized in batch (P3 authorized) |
-| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Verified complete (3b75e50; 66 offline tests pass, live worker recovery and maintenance escalation verified, ack loss crash safety proven, resolve-unknown CLI operational) | Authorized in batch (P4 authorized) |
+| P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Verified complete (3cb2a0a; 66 offline tests pass, live worker recovery & maintenance escalation verified, ack loss crash safety proven, resolve-unknown CLI operational, subagent audit PASS) | Authorized in batch (P4 authorized) |
 | P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
 | P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 | P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
@@ -305,8 +305,18 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Ack loss crash safety proven: `CrashHarness.apply_then_restart_before_ack()` injected pause/crash after real sandbox transaction commit; recovery via `reconcile_execution` GET confirmed `repair_post_count == 1` with `receipt.result == "applied"` without replaying mutation POST.
     - Missing receipt handling proven: unreached execution key results in `execution_unknown` state, blocking new incidents via `ix_one_active_incident` unique constraint (409 conflict).
     - Narrow operator procedure `resolve-unknown --incident <UUID>` implemented and proven: verifies reachability, checks durable receipt, requires quiesce confirmation, non-empty note, and exact typed acknowledgment `ACKNOWLEDGE UNKNOWN <execution-key>`, commits `closed_unknown` with `effect_unknown=true`, records event `execution.closed_unknown`, and releases one-active-incident lock with zero sandbox repair replay.
-    - Pre-dispatch and in-flight cancellation verified: pre-dispatch aborts without sending HTTP POST; in-flight records applied effect and receipt in incident outcome and suppresses independent verification checkout.
-  - **Next action:** Phase P3 Review-and-Fix gate subagent audit.
+  - **Phase P3 Review & Fix Audit (2026-10-14):**
+    - Subagent: `92124d4f-b31a-472f-a562-94aef60bf5aa`
+    - Tasks audited: IL-T10, IL-T11, IL-T12
+    - Verification commands passed:
+      - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (66 passed, 2 deselected in 9.17s)
+      - `npm --prefix frontend ci` (clean, exit 0)
+      - `npm --prefix frontend run typecheck` (zero errors, exit 0)
+      - `npm --prefix frontend run build` (production bundle built, exit 0)
+      - `~/.local/bin/uv run ruff check .` (all checks passed, exit 0)
+    - Fix applied: Updated `tests/test_retrieval.py` (`test_chunk_token_bounds`) to assert strictly `< 200` tokens across all 15 runbook sections (commit `3cb2a0a`).
+    - Audit Verdict: **PASS**. P3 gate passed. Transitioning to Phase P4.
+  - **Next action:** Execute IL-T13: build isolated runner, scorer, and frozen splits.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
