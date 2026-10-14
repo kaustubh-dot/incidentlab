@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Phase P1 Review-and-Fix gate subagent, then advance to IL-T07.
+**Next action:** Execute IL-T07: bound owner approval and atomic claim.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container and schema migrations running and verified in `incidentlab-test`.
 
@@ -64,7 +64,7 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 |---|---|---|---|---|
 | Planning → P0 | Scope/contracts/evaluation/plan | Authorized in batch (2026-10-13) | In progress | Authorized in batch (P1 authorized) |
 | P0 → P1 | Model/lab qualification and healthy checkout | Authorized in batch (2026-10-13) | Verified complete (qualification.json, 23 passed tests, smoke-checkout fulfilled) | Authorized in batch (P2 authorized) |
-| P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P3 authorized) |
+| P1 → P2 | Live evidence to proposal, zero effect | Authorized in batch (2026-10-13) | Verified complete (48f25cd; 34 passed tests, 15 chunks indexed, smoke-checkout fulfilled, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P4 authorized) |
 | P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P5 authorized) |
 | P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Pending | Authorized in batch (P6 authorized) |
