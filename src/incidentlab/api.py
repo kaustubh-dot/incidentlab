@@ -5,15 +5,20 @@ from __future__ import annotations
 import hmac
 import json
 from contextlib import asynccontextmanager
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from incidentlab.config import Settings
 from incidentlab.db import get_control_connection
 from incidentlab.events import read_events
+from incidentlab.executor import CheckoutError, submit_checkout, wait_for_order_fulfillment
 from incidentlab.schemas import (
+    DemoCheckoutRequest,
+    DemoCheckoutResponse,
+    DemoResetResponse,
     EventPage,
     EvidenceItem,
     IncidentView,
@@ -269,6 +274,136 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                 },
             ) from exc
+
+    # --- Owner Demo Controls ---
+
+    @app.post(
+        "/api/v1/demo/reset",
+        response_model=DemoResetResponse,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def demo_reset(req: Request):
+        cfg = req.app.state.settings
+        # Refuse reset if a nonterminal incident exists
+        try:
+            with get_control_connection(cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, state
+                        FROM control.incidents
+                        WHERE state NOT IN (
+                            'verified_recovered', 'verification_failed', 'escalated',
+                            'rejected', 'cancelled', 'closed_unknown'
+                        )
+                        LIMIT 1
+                        """
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                "error": {
+                                    "code": "active_incident_exists",
+                                    "message": (
+                                        f"Cannot reset demo while incident {row[0]} "
+                                        f"is in active state {row[1]}"
+                                    ),
+                                    "request_id": None,
+                                    "retryable": False,
+                                }
+                            },
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": {
+                        "code": "database_unavailable",
+                        "message": f"Failed to query incidents: {exc}",
+                        "request_id": None,
+                        "retryable": True,
+                    }
+                },
+            ) from exc
+
+        # Forward reset to sandbox operator endpoint
+        reset_url = f"{cfg.il_sandbox_base_url}/operator/reset"
+        headers = {"Authorization": f"Bearer {cfg.il_sandbox_admin_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as ac:
+                resp = await ac.post(reset_url, headers=headers)
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail={
+                            "error": {
+                                "code": "sandbox_reset_failed",
+                                "message": (
+                                    f"Sandbox reset returned status {resp.status_code}: {resp.text}"
+                                ),
+                                "request_id": None,
+                                "retryable": False,
+                            }
+                        },
+                    )
+                data = resp.json()
+                return DemoResetResponse(
+                    status=data.get("status", "reset"),
+                    revision=data["revision"],
+                )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error": {
+                        "code": "sandbox_unavailable",
+                        "message": f"Failed to communicate with sandbox: {exc}",
+                        "request_id": None,
+                        "retryable": True,
+                    }
+                },
+            ) from exc
+
+    @app.post(
+        "/api/v1/demo/checkout",
+        response_model=DemoCheckoutResponse,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def demo_checkout(req: Request, payload: DemoCheckoutRequest | None = None):
+        cfg = req.app.state.settings
+        request_key = payload.request_key if (payload and payload.request_key) else uuid4()
+
+        try:
+            accepted = await submit_checkout(request_key, settings=cfg)
+        except CheckoutError as exc:
+            req_id_val = UUID(exc.request_id) if exc.request_id else uuid4()
+            return DemoCheckoutResponse(
+                request_id=req_id_val,
+                order_id=None,
+                status="failed",
+                error=exc.message,
+            )
+
+        try:
+            order = await wait_for_order_fulfillment(
+                accepted.order_id, settings=cfg, timeout_seconds=10.0
+            )
+            return DemoCheckoutResponse(
+                request_id=accepted.request_id,
+                order_id=order.order_id,
+                status=order.status,
+            )
+        except Exception as exc:
+            return DemoCheckoutResponse(
+                request_id=accepted.request_id,
+                order_id=accepted.order_id,
+                status="pending",
+                error=f"Polling error: {exc}",
+            )
 
     return app
 

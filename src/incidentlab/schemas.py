@@ -169,3 +169,22 @@ class EventPage(BaseSchema):
     events: list[EventItem]
     next_seq: int
     has_more: bool
+
+
+# --- Owner Demo Routes Schemas ---
+
+
+class DemoResetResponse(BaseSchema):
+    status: str = "reset"
+    revision: int
+
+
+class DemoCheckoutRequest(BaseSchema):
+    request_key: UUID | None = None
+
+
+class DemoCheckoutResponse(BaseSchema):
+    request_id: UUID
+    order_id: UUID | None = None
+    status: str
+    error: str | None = None

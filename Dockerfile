@@ -30,7 +30,7 @@ COPY --chown=incidentlab:incidentlab data/ ./data/
 COPY --chown=incidentlab:incidentlab src/ ./src/
 RUN uv sync --locked --no-dev
 
-EXPOSE 8000
+EXPOSE 8000 8001
 CMD ["uv", "run", "uvicorn", "incidentlab.api:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # --- Transient evaluation target for isolated test runs ---

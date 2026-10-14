@@ -60,6 +60,8 @@ services:
       context: .
       target: runtime
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8001"
     command: ["uv", "run", "uvicorn", "incidentlab.sandbox.api:app", "--host", "0.0.0.0", "--port", "8001"]
     environment:
       IL_SANDBOX_PORT: "8001"

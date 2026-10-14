@@ -140,7 +140,28 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Single active incident constraint verified: unique partial index prevents second active incident.
     - Audit event log verified: strictly monotonic seq, correct SHA-256 prev_hash chain, sensitive key redaction.
     - API authentication boundary verified: 401 on missing/invalid bearer token, 200 on valid token.
-  - **Next action:** IL-T03 (healthy fake checkout and worker fulfillment).
+  - **Next action:** IL-T03 completed. Next action: P0 Review-and-Fix gate subagent.
+
+- **IL-T03 (2026-10-14):**
+  - **Commit:** `feat: complete healthy sandbox checkout flow`
+  - **Files:** `src/incidentlab/sandbox/__init__.py`, `src/incidentlab/sandbox/schemas.py`, `src/incidentlab/sandbox/service.py`, `src/incidentlab/sandbox/worker.py`, `src/incidentlab/sandbox/api.py`, `src/incidentlab/executor.py`, `tests/test_sandbox_flow.py`, `src/incidentlab/api.py`, `src/incidentlab/cli.py`, `src/incidentlab/db.py`, `src/incidentlab/schemas.py`, `compose.yaml`, `Dockerfile`.
+  - **Commands executed:**
+    - `docker build --target evaluation -t incidentlab-eval:local .` (exit 0)
+    - `docker compose -p incidentlab-test up --build -d sandbox` (exit 0, Uvicorn on 0.0.0.0:8001 with 250ms worker loop)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_sandbox_flow.py -m integration` (exit 0, 6 passed, 1 deselected)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/` (exit 0, 23 passed)
+    - `docker compose -p incidentlab-test up --build -d control` (exit 0, Uvicorn on 0.0.0.0:8000)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (first run: exit 0, fulfilled in 0.335s)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (second run: exit 0, fulfilled in 0.334s)
+    - `uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Fake checkout performs real HTTP inventory check to `http://127.0.0.1:8001/dependency/inventory/SKU-1`.
+    - 250ms worker loop fulfills pending orders transactionally and sets `fulfilled_at`.
+    - Checkout idempotency verified: repeated `request_key` returns the identical order.
+    - Token boundaries enforced: write, read, and admin tokens strictly validated with constant-time comparison.
+    - Owner demo routes `/api/v1/demo/reset` and `/api/v1/demo/checkout` functional and reject resets during nonterminal incidents.
+    - Two distinct smoke-checkout CLI runs succeeded with separate keys and logged structured entries with zero secret leaks.
+  - **Next action:** P0 Review-and-Fix gate subagent.
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
 

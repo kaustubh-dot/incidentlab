@@ -17,6 +17,11 @@ def get_control_connection(settings: Settings) -> psycopg.Connection:
     return psycopg.connect(settings.il_database_url, autocommit=False)
 
 
+def get_sandbox_connection(dsn: str) -> psycopg.Connection:
+    """Obtain a direct psycopg connection for the sandbox role."""
+    return psycopg.connect(dsn, autocommit=False)
+
+
 def check_database_readiness(dsn: str, timeout_seconds: int = 30) -> bool:
     """Wait for PostgreSQL readiness with bounded polling."""
     deadline = time.monotonic() + timeout_seconds

@@ -271,7 +271,12 @@ def main():
     migrate_parser = subparsers.add_parser("migrate", help="Run database migrations (P0)")
     migrate_parser.add_argument("--dsn", type=str, default=None, help="Migration database DSN")
 
-    subparsers.add_parser("smoke-checkout", help="Run healthy checkout check (P0)")
+    smoke_parser = subparsers.add_parser("smoke-checkout", help="Run healthy checkout check (P0)")
+    smoke_parser.add_argument("--key", type=str, default=None, help="Explicit request key UUID")
+    smoke_parser.add_argument(
+        "--timeout", type=float, default=10.0, help="Fulfillment timeout in seconds"
+    )
+
     subparsers.add_parser("index-runbooks", help="Index versioned runbooks (P1)")
     subparsers.add_parser("seed", help="Seed a fault scenario (P1)")
     subparsers.add_parser("smoke-demo", help="Run interactive demo recovery (P2)")
@@ -279,7 +284,7 @@ def main():
 
     args = parser.parse_args()
 
-    future_cmds = ("smoke-checkout", "index-runbooks", "seed", "smoke-demo", "resolve-unknown")
+    future_cmds = ("index-runbooks", "seed", "smoke-demo", "resolve-unknown")
     if args.command == "qualify":
         result = qualify_runtime(args.output)
         print(json.dumps(result, indent=2))
@@ -306,6 +311,60 @@ def main():
         except Exception as exc:
             sys.stderr.write(f"Migration failed: {exc}\n")
             sys.exit(1)
+    elif args.command == "smoke-checkout":
+        import time
+        from uuid import UUID, uuid4
+
+        from incidentlab.executor import submit_checkout, wait_for_order_fulfillment
+
+        async def run_smoke():
+            settings = Settings.from_env()
+            req_key = UUID(args.key) if args.key else uuid4()
+            sys.stderr.write(f"Submitting checkout with request_key={req_key}...\n")
+            t0 = time.monotonic()
+            try:
+                accepted = await submit_checkout(req_key, settings=settings)
+                sys.stderr.write(
+                    f"Checkout accepted: request_id={accepted.request_id}, "
+                    f"order_id={accepted.order_id}, status={accepted.status}\n"
+                )
+            except Exception as exc:
+                sys.stderr.write(f"Checkout submission failed: {exc}\n")
+                return 1
+
+            sys.stderr.write(
+                f"Polling order {accepted.order_id} for fulfillment (timeout={args.timeout}s)...\n"
+            )
+            try:
+                order = await wait_for_order_fulfillment(
+                    accepted.order_id, settings=settings, timeout_seconds=args.timeout
+                )
+                elapsed = time.monotonic() - t0
+                sys.stderr.write(
+                    f"Order {order.order_id} status: '{order.status}' in {elapsed:.2f}s "
+                    f"(fulfilled_at={order.fulfilled_at})\n"
+                )
+                if order.status == "fulfilled":
+                    print(
+                        json.dumps(
+                            {
+                                "status": "fulfilled",
+                                "request_id": str(accepted.request_id),
+                                "order_id": str(order.order_id),
+                                "elapsed_seconds": round(elapsed, 3),
+                            },
+                            indent=2,
+                        )
+                    )
+                    return 0
+                else:
+                    sys.stderr.write(f"FAILURE: Order status is {order.status}\n")
+                    return 1
+            except Exception as exc:
+                sys.stderr.write(f"Order polling failed: {exc}\n")
+                return 1
+
+        sys.exit(asyncio.run(run_smoke()))
     elif args.command in future_cmds:
         sys.stderr.write(
             f"Command '{args.command}' belongs to a later task/phase and is not yet implemented.\n"
