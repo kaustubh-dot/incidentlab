@@ -5,25 +5,31 @@ from __future__ import annotations
 import hmac
 import json
 from contextlib import asynccontextmanager
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
+import psycopg.errors
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from incidentlab.config import Settings
 from incidentlab.db import get_control_connection
-from incidentlab.events import read_events
+from incidentlab.events import read_events, record_event
 from incidentlab.executor import CheckoutError, submit_checkout, wait_for_order_fulfillment
+from incidentlab.graph import run_investigation
 from incidentlab.schemas import (
     DemoCheckoutRequest,
     DemoCheckoutResponse,
     DemoFaultRequest,
     DemoFaultResponse,
     DemoResetResponse,
+    Diagnosis,
     EventPage,
     EvidenceItem,
     IncidentView,
+    Proposal,
+    StartIncident,
 )
 
 
@@ -126,6 +132,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- Authenticated Incident and Evidence Routes ---
 
+    def _load_incident_view(conn: Any, incident_id: UUID) -> IncidentView | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, state, symptom, request_id, order_id, created_at,
+                       updated_at, active_ms, outcome
+                FROM control.incidents
+                WHERE id = %s
+                """,
+                (incident_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            outcome = row[8]
+            if isinstance(outcome, str):
+                outcome = json.loads(outcome)
+
+            cur.execute(
+                """
+                SELECT id, incident_id, payload, payload_digest, target_revision,
+                       created_at, expires_at, evidence_ids
+                FROM control.proposals
+                WHERE incident_id = %s
+                """,
+                (incident_id,),
+            )
+            p_row = cur.fetchone()
+            proposal = None
+            if p_row:
+                p_payload = p_row[2] if isinstance(p_row[2], dict) else json.loads(p_row[2])
+                p_evs = p_row[7] if isinstance(p_row[7], list) else json.loads(p_row[7])
+                proposal = Proposal(
+                    proposal_id=p_row[0],
+                    incident_id=p_row[1],
+                    payload=p_payload,
+                    payload_digest=p_row[3],
+                    target_revision=p_row[4],
+                    created_at=p_row[5],
+                    expires_at=p_row[6],
+                    evidence_ids=p_evs,
+                )
+
+            diagnosis = None
+            if isinstance(outcome, dict) and "diagnosis" in outcome:
+                try:
+                    diagnosis = Diagnosis.model_validate(outcome["diagnosis"])
+                except Exception:
+                    diagnosis = None
+
+            return IncidentView(
+                id=row[0],
+                state=row[1],
+                symptom=row[2],
+                request_id=row[3],
+                order_id=row[4],
+                created_at=row[5],
+                updated_at=row[6],
+                active_ms=row[7],
+                diagnosis=diagnosis,
+                proposal=proposal,
+                outcome=outcome,
+            )
+
     @app.get(
         "/api/v1/incidents/{incident_id}",
         response_model=IncidentView,
@@ -135,45 +206,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cfg = req.app.state.settings
         try:
             with get_control_connection(cfg) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, state, symptom, request_id, order_id, created_at,
-                               updated_at, active_ms, outcome
-                        FROM control.incidents
-                        WHERE id = %s
-                        """,
-                        (str(incident_id),),
+                view = _load_incident_view(conn, incident_id)
+                if not view:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail={
+                            "error": {
+                                "code": "incident_not_found",
+                                "message": f"Incident {incident_id} not found",
+                                "request_id": None,
+                                "retryable": False,
+                            }
+                        },
                     )
-                    row = cur.fetchone()
-                    if not row:
-                        raise HTTPException(
-                            status_code=status.HTTP_404_NOT_FOUND,
-                            detail={
-                                "error": {
-                                    "code": "incident_not_found",
-                                    "message": f"Incident {incident_id} not found",
-                                    "request_id": None,
-                                    "retryable": False,
-                                }
-                            },
-                        )
-                    outcome = row[8]
-                    if isinstance(outcome, str):
-                        outcome = json.loads(outcome)
-                    return IncidentView(
-                        id=row[0],
-                        state=row[1],
-                        symptom=row[2],
-                        request_id=row[3],
-                        order_id=row[4],
-                        created_at=row[5],
-                        updated_at=row[6],
-                        active_ms=row[7],
-                        diagnosis=None,
-                        proposal=None,
-                        outcome=outcome,
-                    )
+                return view
         except HTTPException:
             raise
         except Exception as exc:
@@ -188,6 +234,90 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                 },
             ) from exc
+
+    @app.post(
+        "/api/v1/incidents",
+        response_model=IncidentView,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(verify_owner_token)],
+    )
+    async def create_incident(payload: StartIncident, req: Request):
+        cfg = req.app.state.settings
+        incident_id = uuid4()
+        try:
+            with get_control_connection(cfg) as conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO control.incidents (id, state, symptom, request_id, order_id)
+                            VALUES (%s, 'investigating', %s, %s, %s)
+                            """,
+                            (
+                                incident_id,
+                                payload.symptom,
+                                payload.request_id,
+                                payload.order_id,
+                            ),
+                        )
+                    conn.commit()
+                except psycopg.errors.UniqueViolation:
+                    conn.rollback()
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "error": {
+                                "code": "active_incident_conflict",
+                                "message": "Another active incident is already in progress",
+                                "request_id": None,
+                                "retryable": False,
+                            }
+                        },
+                    )
+
+                record_event(
+                    conn,
+                    incident_id,
+                    "investigation_started",
+                    {
+                        "symptom": payload.symptom,
+                        "request_id": str(payload.request_id),
+                        "order_id": str(payload.order_id) if payload.order_id else None,
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": {
+                        "code": "database_unavailable",
+                        "message": f"Failed to initialize incident: {exc}",
+                        "request_id": None,
+                        "retryable": True,
+                    }
+                },
+            ) from exc
+
+        # Advance LangGraph investigation flow
+        await run_investigation(incident_id, settings=cfg)
+
+        with get_control_connection(cfg) as conn:
+            view = _load_incident_view(conn, incident_id)
+            if not view:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "error": {
+                            "code": "incident_not_found",
+                            "message": f"Incident {incident_id} not found after investigation",
+                            "request_id": None,
+                            "retryable": False,
+                        }
+                    },
+                )
+            return view
 
     @app.get(
         "/api/v1/incidents/{incident_id}/events",

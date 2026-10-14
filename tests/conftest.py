@@ -34,3 +34,51 @@ def live_settings():
     """Load settings from current environment (used in integration runs)."""
     return Settings.from_env()
 
+
+@pytest.fixture(autouse=True)
+def clean_active_incidents(request):
+    """Ensure no stray active incidents block integration tests."""
+    if "integration" in request.keywords or "live_model" in request.keywords:
+        try:
+            settings = Settings.from_env()
+            from incidentlab.db import get_control_connection
+
+            with get_control_connection(settings) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE control.incidents
+                        SET state = 'closed_unknown'
+                        WHERE state NOT IN (
+                            'verified_recovered', 'verification_failed', 'escalated',
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                        )
+                        """
+                    )
+                conn.commit()
+        except Exception:
+            pass
+        yield
+        try:
+            settings = Settings.from_env()
+            from incidentlab.db import get_control_connection
+
+            with get_control_connection(settings) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE control.incidents
+                        SET state = 'closed_unknown'
+                        WHERE state NOT IN (
+                            'verified_recovered', 'verification_failed', 'escalated',
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                        )
+                        """
+                    )
+                conn.commit()
+        except Exception:
+            pass
+    else:
+        yield
+
+

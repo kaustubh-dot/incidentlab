@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BaseSchema(BaseModel):
@@ -76,6 +76,16 @@ class Diagnosis(BaseSchema):
     decision: Literal["propose_repair", "escalate"]
     repair: RepairPayload | None = None
     uncertainty: str = Field(default="", max_length=800)
+
+    @model_validator(mode="after")
+    def validate_decision_repair(self) -> Diagnosis:
+        if self.decision == "escalate" and self.repair is not None:
+            raise ValueError("Repair payload must be null when decision is escalate")
+        if self.decision == "propose_repair" and self.repair is None:
+            raise ValueError("Repair payload is required when decision is propose_repair")
+        if self.confidence != "high" and not self.uncertainty.strip():
+            raise ValueError("Uncertainty explanation is required when confidence is not high")
+        return self
 
 
 class Proposal(BaseSchema):

@@ -117,6 +117,28 @@ def append_event(
     return next_seq
 
 
+def record_event(
+    conn: Any,
+    incident_id: UUID,
+    event_type: str,
+    payload: dict[str, Any],
+    duration_ms: int | None = None,
+    token_count: int | None = None,
+) -> int:
+    """Convenience helper to record an event and commit transaction."""
+    with conn.cursor() as cur:
+        seq = append_event(
+            cur,
+            incident_id,
+            event_type,
+            payload,
+            duration_ms=duration_ms,
+            token_count=token_count,
+        )
+    conn.commit()
+    return seq
+
+
 def read_events(
     cursor: Any,
     incident_id: UUID,

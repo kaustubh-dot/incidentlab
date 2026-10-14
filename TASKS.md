@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T05: connect read-only MCP and keyword retrieval.
+**Next action:** Phase P1 Review-and-Fix gate subagent, then advance to IL-T07.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container and schema migrations running and verified in `incidentlab-test`.
 
@@ -38,8 +38,8 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T02 | Storage, roles, owner API boundary | IL-07, IL-10, IL-11, IL-14 | IL-T01 | verified_complete | `migrations/001_initial.sql` applied; 16 passed in `tests/test_api.py` and `tests/test_model_contract.py` |
 | IL-T03 | Actual healthy checkout and worker fulfillment | IL-01, IL-09, IL-14 | IL-T02 | verified_complete | 23 passed in `tests/`; smoke-checkout fulfilled in 0.33s |
 | IL-T04 | Observable inventory fault and runbook | IL-02, IL-03, IL-06 | P0 accepted; P1 approved; IL-T03 | verified_complete | `data/runbooks/inventory.md`; 26 passed in tests/; `seed` and failing `smoke-checkout` verified |
-| IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | pending | Not run |
-| IL-T06 | Bounded agent and durable proposal | IL-03, IL-05, IL-06, IL-07, IL-10, IL-11 | IL-T05 | pending | Not run |
+| IL-T05 | Read-only MCP and keyword retrieval | IL-03, IL-04, IL-06, IL-11 | IL-T04 | verified_complete | 15 runbook chunks indexed; 5 passed in `tests/test_mcp_boundary.py` and `tests/test_retrieval.py` |
+| IL-T06 | Bounded agent and durable proposal | IL-03, IL-05, IL-06, IL-07, IL-10, IL-11 | IL-T05 | verified_complete | `tests/test_agent_contract.py` passed; live model test produced immutable proposal in `awaiting_approval` with zero sandbox effect |
 | IL-T07 | Bound approval and atomic claim | IL-07, IL-08, IL-11 | P1 accepted; P2 approved; IL-T06 | pending | Not run |
 | IL-T08 | Repair, receipt and functional verification | IL-08, IL-09, IL-11 | IL-T07 | pending | Not run |
 | IL-T09 | Thin UI and first complete live E2E | IL-01, IL-03, IL-07, IL-08, IL-09, IL-10, IL-14 | IL-T08 | pending | Not run |
@@ -196,7 +196,26 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Stdio MCP client transport validates allowed tool names, bounds arguments, executes tools over JSON-RPC stdio streams, and wraps results into typed `EvidenceItem` records.
     - PostgreSQL full-text search indexes 15 runbook sections across 3 runbooks into `control.runbook_chunks` and returns top 3 ranked citations using `ts_rank_cd`.
     - CLI `index-runbooks` command successfully indexes runbook corpus.
-  - **Next action:** IL-T06 (persist bounded agent reasoning and an immutable proposal).
+  - **Next action:** IL-T06 (persist bounded agent reasoning and an immutable proposal) completed. Next action: Phase P1 Review-and-Fix gate subagent, then advance to IL-T07.
+
+- **IL-T06 (2026-10-14):**
+  - **Commit:** `feat: persist bounded agent investigation and proposals`
+  - **Files:** `src/incidentlab/context.py`, `src/incidentlab/graph.py`, `src/incidentlab/api.py`, `src/incidentlab/events.py`, `src/incidentlab/schemas.py`, `tests/test_agent_contract.py`, `tests/conftest.py`.
+  - **Commands executed:**
+    - `uv run ruff check .` (exit 0, all checks passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_agent_contract.py -m 'not live_model and not integration'` (exit 0, 3 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest tests/test_agent_contract.py -k test_live_investigation_inventory_fault` (exit 0, 1 passed in 256.80s)
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 34 passed)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (exit 0, fulfilled in 0.33s)
+  - **Observed facts:**
+    - Context assembly bounded to token budget with truncation and strict error handling (`context_budget_exceeded`).
+    - Investigation graph executes under bounded turns, reading evidence via read-only MCP and retrieving cited runbook guidance.
+    - Proposal generated with canonical SHA-256 digest `payload_digest`, exact target revision snapshot, and citation IDs.
+    - Incident transitions to `awaiting_approval` without applying any target mutation (zero repair effect during investigation, target revision unchanged).
+    - Database isolation preserved: control role never queries sandbox schema directly; evidence obtained exclusively through MCP.
+    - Autouse integration test fixture ensures no lingering active incidents block subsequent runs.
+  - **Next action:** Phase P1 Review-and-Fix gate subagent.
+
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
 
