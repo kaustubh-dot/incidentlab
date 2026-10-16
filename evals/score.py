@@ -625,9 +625,20 @@ def generate_paired_report(
     f_summary = _summarize_approach(fixed_artifacts, fixed_scores_list)
     a_summary = _summarize_approach(agent_artifacts, agent_scores_list)
 
+    split = fixed_artifacts[0].split if fixed_artifacts else (
+        agent_artifacts[0].split if agent_artifacts else "dev"
+    )
+    total_cases = len(all_case_ids)
+    if split == "heldout":
+        title = "IncidentLab Held-Out Split Paired Comparison Report"
+        dataset = f"heldout ({total_cases} frozen cases)"
+    else:
+        title = "IncidentLab Development Split Paired Comparison Report"
+        dataset = f"dev ({total_cases} frozen cases)"
+
     return {
-        "title": "IncidentLab Development Split Paired Comparison Report",
-        "dataset": "dev (12 frozen cases)",
+        "title": title,
+        "dataset": dataset,
         "model": fixed_artifacts[0].model_name if fixed_artifacts else "unknown",
         "fixed_baseline": f_summary,
         "adaptive_agent": a_summary,

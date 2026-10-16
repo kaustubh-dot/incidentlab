@@ -39,8 +39,8 @@ def test_manifest_integrity_and_hashes(repo_root: Path):
     assert "dev" in splits
     assert "heldout" in splits
 
-    # Held-out status MUST be 'not_run' per ROADMAP.md
-    assert splits["heldout"]["status"] == "not_run"
+    # Held-out status is 'not_run' during dev/planning and 'evaluated' after P6 qualification
+    assert splits["heldout"]["status"] in ("not_run", "evaluated")
     assert splits["dev"]["status"] == "ready"
 
     # Verify split counts
