@@ -35,6 +35,7 @@ def redact_sensitive_data(val: Any) -> Any:
                     "output_tokens",
                     "token_count",
                     "tokens",
+                    "tokens_per_second",
                 ):
                     redacted[k] = redact_sensitive_data(v)
                 else:

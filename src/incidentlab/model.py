@@ -44,6 +44,11 @@ class ModelResult:
     output_tokens: int | None
     duration_ms: int
     raw_content: str | None = None
+    load_duration_ms: int | None = None
+    prompt_eval_duration_ms: int | None = None
+    eval_duration_ms: int | None = None
+    tokens_per_second: float | None = None
+
 
 
 # Lazy CPU-only tokenizer cache
@@ -114,6 +119,7 @@ async def call_model(
             "model": settings.il_model,
             "messages": messages,
             "options": options,
+            "think": False,
         }
         if tools and not final_schema:
             kwargs["tools"] = tools
@@ -182,6 +188,21 @@ async def call_model(
     input_tokens = response.get("prompt_eval_count")
     output_tokens = response.get("eval_count")
 
+    load_duration_ns = response.get("load_duration")
+    prompt_eval_duration_ns = response.get("prompt_eval_duration")
+    eval_duration_ns = response.get("eval_duration")
+
+    load_duration_ms = int(load_duration_ns / 1_000_000) if load_duration_ns is not None else None
+    prompt_eval_duration_ms = (
+        int(prompt_eval_duration_ns / 1_000_000) if prompt_eval_duration_ns is not None else None
+    )
+    eval_duration_ms = int(eval_duration_ns / 1_000_000) if eval_duration_ns is not None else None
+    tokens_per_second = (
+        round(output_tokens / (eval_duration_ns / 1e9), 2)
+        if output_tokens and eval_duration_ns and eval_duration_ns > 0
+        else None
+    )
+
     return ModelResult(
         tool_calls=validated_calls,
         diagnosis=diagnosis,
@@ -189,4 +210,8 @@ async def call_model(
         output_tokens=output_tokens,
         duration_ms=duration_ms,
         raw_content=raw_content,
+        load_duration_ms=load_duration_ms,
+        prompt_eval_duration_ms=prompt_eval_duration_ms,
+        eval_duration_ms=eval_duration_ms,
+        tokens_per_second=tokens_per_second,
     )

@@ -115,6 +115,23 @@ def test_model_result_schema():
     assert result.output_tokens == 42
 
 
+def test_model_result_timing_fields():
+    result = ModelResult(
+        tool_calls=[],
+        diagnosis=None,
+        input_tokens=100,
+        output_tokens=50,
+        duration_ms=200,
+        load_duration_ms=10,
+        prompt_eval_duration_ms=40,
+        eval_duration_ms=150,
+        tokens_per_second=333.33,
+    )
+    assert result.tokens_per_second == 333.33
+    assert result.eval_duration_ms == 150
+
+
+
 def test_tokenizer_counting_under_budget():
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},

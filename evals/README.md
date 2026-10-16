@@ -120,3 +120,38 @@ Paired evaluation across all 12 frozen development cases (`qwen3:8b`):
 ### 4. Manifest Integrity (`evals/manifest.json`)
 
 Freezes dataset sizes, family counts, cryptographic SHA-256 hashes for all cases, gold files, and runbooks. Held-out status is kept strictly `not_run` until final release qualification in Phase P6.
+
+## 5. Local Serving Performance Benchmark (`evals/benchmark.py`)
+
+Per PRD IL-05, IL-12, IL-13 and ROADMAP IL-T16, serving performance is benchmarked on the qualified local configuration:
+
+```bash
+uv run python -m evals.benchmark --split dev --sample representative-six --warm-repeats 3
+```
+
+- **Protocol**: Concurrency 1; monotonic wall-clock timing; Ollama provider durations (`load_duration`, `prompt_eval_duration`, `eval_duration`); memory sampled at 0.1s intervals.
+- **Inputs**: 6 frozen representative development inputs (2 clean/noisy per family): `dev-inventory-01`, `dev-inventory-02`, `dev-worker-01`, `dev-worker-02`, `dev-upstream-01`, `dev-upstream-02`.
+- **Observations**: 1 cold-load observation + 3 warm repeats across all 6 inputs (18 warm observations).
+- **Caps**: Retains 6,000 input / 1,024 output token caps and qualified non-thinking mode (`think: False`).
+
+### Baseline Performance Metrics (`artifacts/benchmarks/dev_benchmark.json`)
+
+| Metric | p50 | p95 | Min | Max | Avg |
+|---|---|---|---|---|---|
+| Active Wall-Clock (s) | 34.66 | 48.80 | 30.55 | 52.45 | 37.12 |
+| Model Generation Duration (s) | 33.36 | 36.10 | 27.97 | 37.90 | 32.59 |
+| Prompt Eval Duration (s) | 0.16 | 17.50 | 0.16 | 18.03 | 4.43 |
+| Output Throughput (tokens/s) | 6.24 | 6.31 | 6.18 | 6.31 | 6.24 |
+| Streaming TTFT (s) | 0.26 | 0.28 | 0.26 | 0.28 | 0.265 |
+
+### Resource Consumption & Limitations
+
+- **Streaming TTFT**: 0.26s p50 (timed from HTTP request send to first non-empty content event). Tool-only or empty initial chunks are excluded; stream chunks are never counted as tokens.
+- **Throughput Verification**: Recomputed sample `199 tokens / 31.56s = 6.31 tokens/s` matching provider metric.
+- **Token Averages**: 860.3 input tokens (cap: 6,000), 203.3 output tokens (cap: 1,024).
+- **Memory**: Peak RAM used 14,919.0 MB (~14.9 GB). Host has 125 GiB RAM.
+- **Compute Provider**: CPU offload mode on Ubuntu Linux (`qwen3:8b` Q4_K_M). GPU NVML mismatch documented in `artifacts/qualification.json`.
+- **Cost**: $0.00 paid API calls (100% local hardware).
+- **Active Deadline Compliance (<240s)**: 100% compliant (max observed active wall duration: 52.45s).
+- **Serving Observations**: Disabling reasoning tokens (`think: False`) brings generation latency down from >80s to ~30s on CPU and TTFT to ~0.26s. Without chain-of-thought tokens, the model conservatively defaults structured output decisions to `escalate` even when populating the correct repair action in the `repair` payload.
+

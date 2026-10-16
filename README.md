@@ -2,7 +2,7 @@
 
 A bounded application-recovery agent: investigate a broken sandbox checkout, propose a specific repair, wait for human approval, and verify the result through actual application behavior.
 
-**Status: Active implementation in progress. Phase P0 (qualified runtime & healthy checkout sandbox), Phase P1 (observable fault injection, MCP tools, runbook FTS indexing, and bounded LangGraph investigation), Phase P2 (bound owner approval, deterministic repair execution, independent functional verification, and thin owner UI console), Phase P3 (worker stall, upstream maintenance escalation, durable recovery, bounded context), and Phase P4 (isolated evaluation harness, paired development baseline report) are implemented.**
+**Status: Active implementation in progress. Phase P0 (qualified runtime & healthy checkout sandbox), Phase P1 (observable fault injection, MCP tools, runbook FTS indexing, and bounded LangGraph investigation), Phase P2 (bound owner approval, deterministic repair execution, independent functional verification, and thin owner UI console), Phase P3 (worker stall, upstream maintenance escalation, durable recovery, bounded context), Phase P4 (isolated evaluation harness, paired development baseline report), and Phase P5 IL-T16 (serving performance benchmark on qualified local configuration) are implemented.**
 
 Private repository: [kaustubh-dot/incidentlab](https://github.com/kaustubh-dot/incidentlab).
 
@@ -22,6 +22,19 @@ Planned capabilities:
 This is not an autonomous DevOps platform, cloud administrator, unrestricted coding agent, or real payment system. Fine-tuning is not required.
 
 Dense/hybrid retrieval experiments are outside active scope unless an observed retrieval failure justifies a separately approved change. The required focus remains investigation, approval, bounded repair, and verified recovery.
+
+## Measured Local Serving Baseline (Qwen3:8B on Local CPU)
+
+Per PRD IL-05, IL-12, IL-13 and ROADMAP IL-T16, serving performance has been measured across 18 warm observations (3 repeats of 6 representative development inputs) at concurrency one:
+
+- **Active Wall-Clock Duration**: p50 = 34.66s, p95 = 48.80s, max = 52.45s (Target: < 240s, 100% compliant)
+- **Model Generation Duration**: p50 = 33.36s, p95 = 36.10s, avg = 32.59s
+- **Output Throughput**: p50 = 6.24 tokens/s, p95 = 6.31 tokens/s (CPU compute)
+- **Streaming TTFT**: p50 = 0.26s, p95 = 0.28s (timed on first non-empty content event)
+- **Paid Inference API Calls**: 0 (100% local hardware, zero cloud API dependencies)
+- **Peak RAM Used**: 14.9 GB (Host: 125 GiB)
+
+Full benchmark artifacts are recorded in `artifacts/benchmarks/dev_benchmark.json` and documented in `evals/README.md`.
 
 ## Read the planning pack
 
