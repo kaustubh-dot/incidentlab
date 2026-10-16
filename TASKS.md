@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T16: measure one qualified serving configuration.
+**Next action:** Execute IL-T19: run the paired eighteen-case held-out evaluation.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -49,9 +49,9 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T13 | Frozen cases, isolated runner and scoring | IL-11, IL-12 | P3 accepted; P4 approved; IL-T12 | verified_complete | Commit `f1c1827`; 12 dev & 18 heldout cases frozen in `evals/manifest.json` (SHA-256 verified), heldout `not_run`, deterministic scorer `evals/score.py`, `tests/test_evaluation.py` (8 passed) |
 | IL-T14 | Fixed-versus-agent development comparison | IL-03, IL-05, IL-06, IL-12 | IL-T13 | verified_complete | Commit `804a527`; `evals/baseline.py` executes exact 4 reads -> retrieval -> 1 schema call; paired dev comparison on 12 cases (`dev_report.json`), 100% relevant coverage, 0 unauthorized repairs, 0 fabricated verifications |
 | IL-T15 | Essential security regressions and offline CI | IL-04, IL-07, IL-08, IL-09, IL-11, IL-14 | IL-T14 | verified_complete | Commit `1f535ee`; `.github/workflows/ci.yml` lean offline CI workflow (Ruff, pytest, typecheck, build), security regressions (secret/tool boundary, prompt injection in logs, unauthorized repair refusal), Docker COPY boundaries verified |
-| IL-T16 | Actual local baseline serving benchmark | IL-05, IL-12, IL-13 | P4 accepted; P5 approved; IL-T15 | pending | Not run |
-| IL-T17 | Clear evidence, authority, failure UI | IL-03, IL-07, IL-09, IL-10, IL-11 | IL-T16 | pending | Not run |
-| IL-T18 | Clean-clone rehearsal and accurate guide | IL-01, IL-10, IL-13, IL-14 | IL-T16, IL-T17 | pending | Not run |
+| IL-T16 | Actual local baseline serving benchmark | IL-05, IL-12, IL-13 | P4 accepted; P5 approved; IL-T15 | verified_complete | Commit `b8cc191`; local CPU benchmark (concurrency 1, monotonic timing, streaming TTFT, memory sampling at 0.1s); `dev_benchmark.json` and `bm-1792168104/` (18 warm observations, p50=34.66s, 6.24 tok/s, 0 paid calls) |
+| IL-T17 | Clear evidence, authority, failure UI | IL-03, IL-07, IL-09, IL-10, IL-11 | IL-T16 | verified_complete | Commit `45f7794`; readable evidence/authority/failure UI (`App.tsx`, `styles.css`); resilient read-only polling, keyboard a11y, telemetry display, credential-free copy summary, 9 actionable banners; 12 passed in `tests/test_api.py` |
+| IL-T18 | Clean-clone rehearsal and accurate guide | IL-01, IL-10, IL-13, IL-14 | IL-T16, IL-T17 | verified_complete | Commit `9408bb6`; clean setup rehearsed in `incidentlab-clean` (migrations, runbook index, healthy checkout, full recovery demo verified); guide in `README.md`, `.env.example`, `compose.yaml` |
 | IL-T19 | Frozen paired 18-case held-out report | IL-03, IL-05, IL-06, IL-07, IL-08, IL-09, IL-11, IL-12, IL-13 | P5 accepted; P6 approved; IL-T18 | pending | Not run |
 | IL-T20 | Requirement evidence and interview review | IL-01–IL-14 | IL-T19 release gates pass | pending | Not run |
 | IL-T21 | Final live demo and accepted handoff | IL-01–IL-14 | IL-T20 | pending | Not run |
@@ -68,7 +68,7 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Verified complete (8becaab; 51 offline tests pass, npm ci/typecheck/build pass, live E2E pass, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Verified complete (3cb2a0a; 66 offline tests pass, live worker recovery & maintenance escalation verified, ack loss crash safety proven, resolve-unknown CLI operational, subagent audit PASS) | Authorized in batch (P4 authorized) |
 | P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Verified complete (329b8dc; 77 offline tests pass, 12-case dev report generated with 0 unauthorized repairs / 0 fabricated verifications, held-out frozen and not_run, lean offline CI configured, subagent audit PASS) | Authorized in batch (P5 authorized) |
-| P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
+| P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Verified complete (673ba77; 82 offline tests pass, serving benchmark recorded, legible evidence/failure UI, clean-clone setup verified, subagent audit PASS) | User final acceptance required |
 | P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
 
 ## Design decisions
@@ -418,7 +418,23 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Documentation updated with prerequisites, licence/model pin, known limits, short demo, and concise architecture notes.
     - `git diff --check` and `uv run ruff check .` passed with 0 errors.
 
-- **Next action:** Invoke Phase P5 Review-and-Fix subagent to audit IL-T16, IL-T17, and IL-T18 before gate transition to Phase P6.
+  - **Phase P5 Review & Fix Audit (2026-10-16):**
+    - Subagent: `be4f8ab9-133b-489d-a544-a7d1900bd481`
+    - Tasks audited: IL-T16, IL-T17, IL-T18
+    - Verification commands passed:
+      - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (82 passed, 2 deselected in 9.60s)
+      - `npm --prefix frontend ci` (audited 70 packages, exit 0)
+      - `npm --prefix frontend run typecheck` (zero errors, exit 0)
+      - `npm --prefix frontend run build` (production bundle built in 294ms, exit 0)
+      - `~/.local/bin/uv run ruff check .` (all checks passed, exit 0)
+      - `git diff --check` (passed with 0 errors)
+      - `evals/cases/heldout.jsonl` status in `evals/manifest.json` strictly `not_run`, SHA-256 hashes untouched
+    - Audit findings:
+      - IL-T16: Serving benchmark runner in `evals/benchmark.py` verified at concurrency 1, monotonic timers, provider durations (load, prompt_eval, eval), streaming TTFT on first non-empty content event, memory sampling at 0.1s interval, emitting raw and summary artifacts under `artifacts/benchmarks/dev_benchmark.json` and `artifacts/benchmarks/bm-1792168104/` (measurements.jsonl, summary.json, report.md); 1 cold-load observation + 18 warm observations (3 repeats of 6 representative development inputs); honest reporting of local CPU metrics (p50 wall-clock 34.66s, 6.24 tokens/s throughput, 14.9 GB peak RAM, 0 paid calls), no invented optimization claims.
+      - IL-T17: Evidence, authority, and failures verified in `frontend/src/{App.tsx,types.ts,styles.css}` and `tests/test_api.py`. Resilient read-only polling preserves prior evidence/events on error and avoids repeating mutations; keyboard accessibility verified (Escape closes evidence modal, focus-visible indicators, aria labels); telemetry metrics displayed (model duration, tool duration/reads, throughput tok/s, approval wait duration); credential-free copy summary; actionable banners for all 9 states including `execution_unknown` with read-only reconcile button and narrow operator CLI command (`python -m incidentlab.cli resolve-unknown --incident <id>`); focused unit tests in `tests/test_api.py` assert cancellation, reconcile 404s, and token absence from error responses and events.
+      - IL-T18: Clean fresh setup verified in separate compose project `incidentlab-clean` with fresh named volumes and local secrets; migrations, runbook index (15 sections), healthy checkout, and live recovery demo (real Ollama inference, proposal, approval, single repair dispatch, fulfilled verification order `9ffaea50-3e5b-4443-83d9-343b089c9a80`) all passed cleanly; accurate operation instructions, prerequisites, licence/model pin, known limits, and short demo guide published in `README.md`, `compose.yaml`, `.env.example`, `evals/README.md`.
+    - Audit Verdict: **PASS**. P5 gate passed. Transitioning to Phase P6.
+  - **Next action:** Execute IL-T19: run the paired eighteen-case held-out evaluation.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
