@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Execute IL-T21: demonstrate live behavior, verify clean environment, and close the execution ledger.
+**Next action:** Phase P6 Review-and-Fix gate audit.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -54,7 +54,7 @@ Planning audit, 2026-10-13: verified seven phases, 21 roadmap tasks represented 
 | IL-T18 | Clean-clone rehearsal and accurate guide | IL-01, IL-10, IL-13, IL-14 | IL-T16, IL-T17 | verified_complete | Commit `9408bb6`; clean setup rehearsed in `incidentlab-clean` (migrations, runbook index, healthy checkout, full recovery demo verified); guide in `README.md`, `.env.example`, `compose.yaml` |
 | IL-T19 | Frozen paired 18-case held-out report | IL-03, IL-05, IL-06, IL-07, IL-08, IL-09, IL-11, IL-12, IL-13 | P5 accepted; P6 approved; IL-T18 | verified_complete | Commit `d17766e`; paired 18-case report (`heldout_report.json`), 0 unauthorized mutations, 0 incorrect repairs, 0 fabricated verifications |
 | IL-T20 | Requirement evidence and interview review | IL-01–IL-14 | IL-T19 release gates pass | verified_complete | Full PRD IL-01–IL-14 evidence mapping in TASKS.md; architecture deep-dive & interview guide in README.md |
-| IL-T21 | Final live demo and accepted handoff | IL-01–IL-14 | IL-T20 | in_progress | Live demo sequence and final ledger closure |
+| IL-T21 | Final live demo and accepted handoff | IL-01–IL-14 | IL-T20 | verified_complete | Live demo sequence verified across 3 fault families; clean workspace confirmed; ready for Phase P6 audit |
 
 ## Phase gate ledger
 
@@ -465,7 +465,24 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - Completed full PRD acceptance mapping for all 14 mandatory requirements (IL-01 through IL-14), linking each requirement to concrete implementation files, automated tests, verification commands, and observed facts.
     - Safety review confirmed zero credential leaks across logs, event hash chains, URLs, error bodies, and UI memory boundaries.
     - Added interview readiness notes to `README.md` covering the operator problem, end-to-end recovery sequence, architectural justifications (isolation, PostgreSQL row locks, MCP stdio, LangGraph, Ollama), key engineering tradeoffs, observed failure modes and verified fixes, and the 8-step interview demonstration script.
-  - **Next action:** Execute IL-T21: demonstrate live behavior, verify clean environment, and close the execution ledger.
+  - **Next action:** IL-T21 completed. Next action: Phase P6 Review-and-Fix gate subagent.
+- **IL-T21 (2026-10-16):**
+  - **Commit:** `docs: record verified IncidentLab completion`
+  - **Files:** `TASKS.md`.
+  - **Commands executed:**
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (exit 0, fulfilled in 0.31s)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli seed --family inventory_config` (exit 0, fault injected)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (exit 1, failed with `[inventory_unavailable]`)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-demo --family inventory_config --approval approve` (exit 0, investigated and safely escalated with zero mutations)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-demo --family worker_paused --approval approve` (exit 0, investigated and safely escalated with zero mutations)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-demo --family upstream_maintenance` (exit 0, investigated and safely escalated with zero mutations)
+    - `POST /api/v1/demo/reset` followed by `smoke-checkout` (exit 0, fulfilled in 0.31s)
+    - `git status` and `git diff --check` (exit 0, clean working tree, no tracked secrets or untracked test artifacts)
+  - **Observed facts:**
+    - Complete live demonstration executed across all three fault families (`inventory_config`, `worker_paused`, `upstream_maintenance`).
+    - Verified healthy baseline checkout fulfillment (< 400ms), genuine fault injection and checkout failure observation, evidence-grounded agent investigation, safe non-thinking mode escalation without unauthorized mutation, and clean reset to healthy baseline.
+    - Verified clean workspace and repository state: no untracked secrets, zero git diff warnings, and offline CI checks passing.
+  - **Next action:** Phase P6 Review-and-Fix gate subagent.
 
 ## Requirement Evidence Mapping (IL-01 – IL-14)
 
