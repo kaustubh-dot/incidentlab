@@ -663,6 +663,15 @@ def main():
 
         control_pw = os.environ.get("IL_CONTROL_DB_PASSWORD")
         sandbox_pw = os.environ.get("IL_SANDBOX_DB_PASSWORD")
+        if not control_pw and os.environ.get("IL_DATABASE_URL"):
+            from urllib.parse import urlparse
+
+            control_pw = urlparse(os.environ["IL_DATABASE_URL"]).password
+        if not sandbox_pw and os.environ.get("IL_SANDBOX_DATABASE_URL"):
+            from urllib.parse import urlparse
+
+            sandbox_pw = urlparse(os.environ["IL_SANDBOX_DATABASE_URL"]).password
+
 
         try:
             sys.stderr.write("Waiting for PostgreSQL database readiness...\n")

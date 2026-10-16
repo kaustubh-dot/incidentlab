@@ -148,4 +148,35 @@ def run_migrations(
     except Exception as exc:
         raise RuntimeError(f"Failed to setup LangGraph PostgreSQL checkpointer: {exc}") from exc
 
+    # Ensure role grants are applied across all tables (including newly created ones)
+    with psycopg.connect(migration_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'incidentlab_control') THEN
+                        GRANT USAGE ON SCHEMA control, checkpoints TO incidentlab_control;
+                        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES
+                            IN SCHEMA control, checkpoints TO incidentlab_control;
+                        GRANT USAGE, SELECT ON ALL SEQUENCES
+                            IN SCHEMA control, checkpoints TO incidentlab_control;
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA control
+                            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO incidentlab_control;
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA checkpoints
+                            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO incidentlab_control;
+                    END IF;
+                    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'incidentlab_sandbox') THEN
+                        GRANT USAGE ON SCHEMA sandbox TO incidentlab_sandbox;
+                        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES
+                            IN SCHEMA sandbox TO incidentlab_sandbox;
+                        GRANT USAGE, SELECT ON ALL SEQUENCES
+                            IN SCHEMA sandbox TO incidentlab_sandbox;
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA sandbox
+                            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO incidentlab_sandbox;
+                    END IF;
+                END
+                $$;
+                """
+            )
     return applied

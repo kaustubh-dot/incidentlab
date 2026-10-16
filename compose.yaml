@@ -37,7 +37,7 @@ services:
       target: runtime
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${IL_HOST_PORT:-8000}:8000"
     environment:
       IL_BIND_HOST: "0.0.0.0"
       IL_PORT: "8000"
@@ -48,7 +48,7 @@ services:
       IL_SANDBOX_WRITE_TOKEN: ${IL_SANDBOX_WRITE_TOKEN:?Required write token}
       IL_SANDBOX_ADMIN_TOKEN: ${IL_SANDBOX_ADMIN_TOKEN:?Required admin token}
       IL_SANDBOX_BASE_URL: "http://sandbox:8001"
-      IL_OLLAMA_BASE_URL: "http://ollama:11434"
+      IL_OLLAMA_BASE_URL: ${IL_OLLAMA_BASE_URL:-http://ollama:11434}
       IL_MODEL: ${IL_MODEL:-qwen3:8b}
       IL_MODEL_TIMEOUT_SECONDS: ${IL_MODEL_TIMEOUT_SECONDS:-300}
       IL_ACTIVE_DEADLINE_SECONDS: ${IL_ACTIVE_DEADLINE_SECONDS:-600}
@@ -63,7 +63,7 @@ services:
       target: runtime
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:${IL_SANDBOX_HOST_PORT:-8001}:8001"
     command: ["uv", "run", "uvicorn", "incidentlab.sandbox.api:app", "--host", "0.0.0.0", "--port", "8001"]
     environment:
       IL_SANDBOX_PORT: "8001"

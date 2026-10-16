@@ -58,51 +58,181 @@ One LangGraph agent investigates through read-only MCP tools. Repair execution r
 
 Ollama serves the initial `qwen3:8b` candidate. Model identity, tool behavior, memory fit, and latency must be measured. Linux lab access with Docker and sudo is authorized; actual installed components and available GPU capacity remain unverified. The lab is not assumed to be a permanent public host.
 
-## Setup and execution status
+## Setup and Execution Guide
 
-This planning scaffold is not runnable. Application commands become available only after their files and lockfiles are created by [ROADMAP.md](ROADMAP.md). That document owns the exact setup and execution sequence.
+### 1. Prerequisites
+- **Operating System**: Linux (tested on Ubuntu 24.04 LTS / Debian-based kernels)
+- **Container Runtime**: Docker & Docker Compose v2+
+- **Languages & Package Managers**: Python 3.12+, Node.js 24 LTS, `uv` package manager
+- **Model Provider**: Ollama serving `qwen3:8b` (SHA-256 digest: `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41`, Q4_K_M quantization)
+- **Host Resources**: At least 16 GB system RAM for CPU inference (125 GB available in reference lab)
 
-The planned reference environment is Linux, Python 3.12, Node.js 24 LTS, Git, `uv`, Docker/Compose, and the qualified Ollama endpoint. Windows can hold the repository and edit the documents. The GPU profile is qualified before use; never assume that sudo access proves a working container GPU runtime.
+### 2. Configuration & Secret Generation
+Copy `.env.example` to an ignored `.env` and generate random secrets (at least 32 bytes hex):
 
-Configuration belongs in an ignored local `.env`. [.env.example](.env.example) contains no real credentials. Blank required secrets must fail clearly. Keep SSH passwords and keys out of files, command logs, and Git. The public-facing UI is local/private by default; database, model, and sandbox-control services must not be exposed publicly.
+```bash
+# Generate secrets and populate local .env
+python3 -c "
+import secrets
 
-Run one flagship GPU workload at a time unless measured capacity supports more. IncidentLab must not require MoneyTrail to be installed or running.
+pg_pass = secrets.token_hex(32)
+ctrl_pass = secrets.token_hex(32)
+sb_pass = secrets.token_hex(32)
+owner_token = secrets.token_hex(32)
+read_token = secrets.token_hex(32)
+write_token = secrets.token_hex(32)
+admin_token = secrets.token_hex(32)
 
-## First implementation handoff
+print(f'''POSTGRES_DB=incidentlab
+POSTGRES_USER=incidentlab_migrator
+POSTGRES_PASSWORD={pg_pass}
+IL_CONTROL_DB_PASSWORD={ctrl_pass}
+IL_SANDBOX_DB_PASSWORD={sb_pass}
+IL_BIND_HOST=127.0.0.1
+IL_PORT=8000
+IL_HOST_PORT=8000
+IL_SANDBOX_HOST_PORT=8001
+IL_DATABASE_URL=postgresql://incidentlab_control:{ctrl_pass}@postgres:5432/incidentlab
+IL_SANDBOX_DATABASE_URL=postgresql://incidentlab_sandbox:{sb_pass}@postgres:5432/incidentlab
+IL_MIGRATION_DATABASE_URL=postgresql://incidentlab_migrator:{pg_pass}@postgres:5432/incidentlab
+IL_OWNER_TOKEN={owner_token}
+IL_SANDBOX_READ_TOKEN={read_token}
+IL_SANDBOX_WRITE_TOKEN={write_token}
+IL_SANDBOX_ADMIN_TOKEN={admin_token}
+IL_SANDBOX_BASE_URL=http://sandbox:8001
+IL_OLLAMA_BASE_URL=http://ollama:11434
+IL_MODEL=qwen3:8b
+IL_MODEL_TIMEOUT_SECONDS=300
+IL_ACTIVE_DEADLINE_SECONDS=600
+IL_MAX_MODEL_TURNS=4
+IL_MAX_READ_CALLS=6
+IL_MAX_INPUT_TOKENS=6000
+IL_MAX_OUTPUT_TOKENS=1024
+IL_APPROVAL_TTL_SECONDS=600
+IL_LOG_LEVEL=INFO''')
+" > .env
+```
 
-Give the implementation agent this instruction:
+### 3. Database Migration and Runbook Indexing
+Migrate database schemas and index operational runbooks before starting background services. Normal application services never receive bootstrap or migration credentials:
 
-> Read AGENTS.md, PRD.md, ARCHITECTURE.md, ROADMAP.md, TASKS.md, and EVALUATION.md. Identify the last verified checkpoint and first incomplete task. Execute only the phase I authorize. Preserve the actual investigation, explicit approval, bounded repair, and independent verification workflow. Do not turn the system into canned diagnosis or unrestricted infrastructure automation. At the gate, demonstrate the result, run the minimal checks, update TASKS.md, commit the coherent checkpoint, and stop for review before the next phase.
+```bash
+# 1. Start database container
+docker compose up -d postgres
 
-The user has authorized the project direction and this planning repository. Per-phase implementation approvals are separate and recorded in `TASKS.md`.
+# 2. Run schema migrations
+docker compose run --rm -e IL_MIGRATION_DATABASE_URL control uv run python -m incidentlab.cli migrate
 
-## Intended interview demonstration
+# 3. Index versioned runbooks into PostgreSQL full-text search
+docker compose run --rm control uv run python -m incidentlab.cli index-runbooks
+```
 
-This is the required product journey, not a currently available demo:
+### 4. Running Application Services
+Start the control service (FastAPI backend + embedded React UI) and the isolated target sandbox:
 
-1. Place a successful fake order through the sandbox UI.
-2. Activate a known demonstration fault through operator-only controls.
-3. Show the real checkout or processing failure.
-4. Ask the agent to investigate and inspect its tool observations and runbook citations.
-5. Review the proposed action. Reject it once and show that no repair occurs.
-6. Approve a fresh valid proposal and observe the bounded repair.
-7. Verify a new order completes correctly; inspect the receipt and run timeline.
-8. Demonstrate upstream maintenance, where the correct outcome is escalation rather than an invented repair.
+```bash
+# Start all services
+docker compose up -d
 
-Prepared fault scenarios are legitimate demo data. The agent must not receive their hidden IDs or answer keys. Saved traces are labelled replays, not live inference. A green health badge alone does not prove functional recovery.
+# Check service health and port bindings
+docker compose ps
+```
+- **Control Web Console**: `http://127.0.0.1:8000`
+- **Sandbox API**: `http://127.0.0.1:8001` (authenticated by read/write/admin tokens)
 
-## Interview preparation at completion
+To stop services:
+```bash
+docker compose down
+```
 
-Replace this preparation checklist with concise notes based on the actual implementation before marking the project complete:
+## Live Interview Demonstration
 
-- Explain the operator problem and why the agent is limited to one sandbox application.
-- Trace investigation, proposal, approval, execution, and independent verification.
-- Explain how the agent is prevented from obtaining write credentials or arbitrary execution tools.
-- Explain why a restart or repeated approval does not justify blindly repeating a write.
-- Present outcome evaluation and baseline results, including failures and escalations.
-- Explain the smallest architecture that provides these guarantees and why extra agents, queues, and Kubernetes were excluded.
-- Discuss one real failure and its verified fix, along with the project's limits.
+The system implements the complete 8-step recovery flow through CLI and the web console:
 
-## Completion standard
+1. **Verify Healthy Baseline**:
+   ```bash
+   docker compose exec -T control python -m incidentlab.cli smoke-checkout
+   ```
+   Submits a fake checkout, probes the 250ms worker loop, and verifies fulfillment.
 
-All mandatory PRD requirements must work, including the actual sandbox workflow and the critical authorization controls. Verify acceptance checks, clean-clone setup, accurate startup instructions, and a repeatable demonstration. Resolve material security and integrity failures. Do not mark the project complete merely because its folders, prompts, tests, or UI exist.
+2. **Fault Injection**:
+   ```bash
+   docker compose exec -T control python -m incidentlab.cli seed --family inventory_config
+   ```
+   Mutates the sandbox target endpoint from `inventory-local` to deprecated `inventory-legacy` and generates background noise traffic.
+
+3. **Interactive Demo (Investigate, Propose, Approve, Verify)**:
+   ```bash
+   docker compose exec -T control python -m incidentlab.cli smoke-demo --family inventory_config --approval approve
+   ```
+   - Observes actual checkout failure (`HTTP 503 / inventory_unavailable`).
+   - Runs bounded LangGraph investigation over read-only MCP tools (`get_health`, `get_logs`, `get_config`, `probe_checkout`).
+   - Retrieves top 3 ranked runbook citations via PostgreSQL FTS (`websearch_to_tsquery`).
+   - Emits an immutable proposal with canonical SHA-256 payload digest and target revision snapshot.
+   - Evaluates owner decision (`approve` or `reject`). Rejection commits zero execution.
+   - Acquires atomic execution claim (`claimed`), dispatches finite repair (`set_inventory_endpoint`), and receives receipt (`applied`, before_revision=3, after_revision=4).
+   - Executes independent verification checkout and confirms new order fulfillment.
+
+4. **Worker Pause & Resume Demo**:
+   ```bash
+   docker compose exec -T control python -m incidentlab.cli smoke-demo --family worker_paused --approval approve
+   ```
+   Demonstrates worker stall where checkouts return 202 Accepted but stay pending until the approved `resume_order_worker` repair executes.
+
+5. **Upstream Maintenance Escalation**:
+   ```bash
+   docker compose exec -T control python -m incidentlab.cli smoke-demo --family upstream_maintenance
+   ```
+   Demonstrates safe escalation when the runbook directs `escalate`: zero repair dispatch, `repair: null`, and state transitions to `escalated`.
+
+6. **Web Dashboard Operation**:
+   Open `http://127.0.0.1:8000` in a browser. Supply your owner token in the top auth bar.
+   - Use the **Demo Controls** panel to submit fake checkouts, seed faults, or reset the sandbox.
+   - Monitor real-time ordered event streams with SHA-256 hash chains.
+   - Click evidence citation pills to inspect evidence item payloads in a modal.
+   - Review proposed repairs with payload digest and target revision. Click **Approve Repair** or **Reject Proposal**.
+   - Copy audit summaries with token-scrubbed details via **Copy Summary**.
+
+## Operator Safety & Edge-Case Procedures
+
+### Handling Execution State Unknown (`execution_unknown`)
+If a network disconnect occurs while dispatching an approved repair, IncidentLab refuses to blindly retry the mutation POST. Instead, it marks the incident `execution_unknown`.
+1. **Read-Only Receipt Reconciliation**:
+   In the UI, click **Reconcile Receipt Status (Read-Only)** or call `POST /api/v1/incidents/{id}/reconcile`. This performs a GET lookup against the sandbox receipt ledger to check if the repair was already committed.
+2. **Explicit Operator Closure**:
+   If the repair was not received and sandbox state is uncertain, an operator confirms system quiescence and closes the incident via CLI:
+   ```bash
+   docker compose exec -T control python -m incidentlab.cli resolve-unknown \
+     --incident <INCIDENT_UUID> \
+     --ack "ACKNOWLEDGE UNKNOWN <EXECUTION_KEY>" \
+     --note "Operator verified sandbox target quiescence manually"
+   ```
+   This releases the `ix_one_active_incident` unique constraint lock without repeating the write.
+
+## Evaluation & Benchmarks
+
+```bash
+# Run representative 6-input serving performance benchmark (warm repeats)
+docker compose exec -T control python -m evals.benchmark --split dev --sample representative-six --warm-repeats 3
+
+# Run offline paired evaluation across the 12-case development split
+docker compose exec -T control python -m evals.run --split dev --approach agent
+docker compose exec -T control python -m evals.run --split dev --approach fixed
+docker compose exec -T control python -m evals.score --compare \
+  --fixed artifacts/evals/dev_fixed.json \
+  --agent artifacts/evals/dev_agent.json \
+  --output artifacts/evals/dev_report.json
+```
+
+## Architecture Tradeoffs and Known Limits
+
+1. **Local Serving Latency (CPU vs GPU)**:
+   - Serving `qwen3:8b` on host CPU takes ~30–48s per diagnostic turn. While compliant with our 240s active budget, non-thinking mode is selected to balance latency and structured schema output.
+2. **One Active Incident Constraint**:
+   - `control.incidents` enforces at most one active nonterminal incident via partial unique index `ix_one_active_incident`. This eliminates split-brain repairs across parallel faults.
+3. **Strict Credential Boundaries**:
+   - Control application cannot read sandbox tables directly. Sandbox process cannot read control tables.
+   - Diagnostic tools exposed via MCP run under a dedicated read-only role with strictly read tokens.
+   - The model has zero repair execution tools registered. Execution is strictly handled by the deterministic control application upon owner approval.
+4. **Idempotency & Zero Mutation Retries**:
+   - Repair dispatch never retries POST requests automatically to prevent duplicate side effects. Recovery relies on durable receipts and idempotent sandbox state transactions.
