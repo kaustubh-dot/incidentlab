@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Phase P6 Review-and-Fix gate audit.
+**Next action:** Project complete. Final portfolio handoff and walkthrough presentation to user.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -68,8 +68,8 @@ Record actual approving user statement/chat reference, date, checkpoint commit, 
 | P2 → P3 | Full inventory recovery and rejection | Authorized in batch (2026-10-13) | Verified complete (8becaab; 51 offline tests pass, npm ci/typecheck/build pass, live E2E pass, subagent audit PASS) | Authorized in batch (P3 authorized) |
 | P3 → P4 | Three families, retrieval, crash safety | Authorized in batch (2026-10-13) | Verified complete (3cb2a0a; 66 offline tests pass, live worker recovery & maintenance escalation verified, ack loss crash safety proven, resolve-unknown CLI operational, subagent audit PASS) | Authorized in batch (P4 authorized) |
 | P4 → P5 | Dev comparison, frozen held-out, offline CI | Authorized in batch (2026-10-13) | Verified complete (329b8dc; 77 offline tests pass, 12-case dev report generated with 0 unauthorized repairs / 0 fabricated verifications, held-out frozen and not_run, lean offline CI configured, subagent audit PASS) | Authorized in batch (P5 authorized) |
-| P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Verified complete (673ba77; 82 offline tests pass, serving benchmark recorded, legible evidence/failure UI, clean-clone setup verified, subagent audit PASS) | User final acceptance required |
-| P6 → Complete | ≥15/18 plus hard-zero gates and final demo | Authorized in batch (2026-10-13) | Pending | User final acceptance required |
+| P5 → P6 | Measured serving, usable UI, clean setup | Authorized in batch (2026-10-13) | Verified complete (673ba77; 82 offline tests pass, serving benchmark recorded, legible evidence/failure UI, clean-clone setup verified, subagent audit PASS) | Authorized in batch (P6 authorized) |
+| P6 → Complete | All 14 PRD requirements (IL-01–IL-14) mapped & verified, held-out evaluation complete with 0 unauthorized mutations, interview guide complete, live demo verified | Authorized in batch (2026-10-13) | Verified complete (cc54c47; 82 offline tests pass, paired 18-case report published, live demo across 3 families verified, subagent audit PASS) | Project complete; ready for user handoff |
 
 ## Design decisions
 
@@ -481,8 +481,21 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
   - **Observed facts:**
     - Complete live demonstration executed across all three fault families (`inventory_config`, `worker_paused`, `upstream_maintenance`).
     - Verified healthy baseline checkout fulfillment (< 400ms), genuine fault injection and checkout failure observation, evidence-grounded agent investigation, safe non-thinking mode escalation without unauthorized mutation, and clean reset to healthy baseline.
-    - Verified clean workspace and repository state: no untracked secrets, zero git diff warnings, and offline CI checks passing.
-  - **Next action:** Phase P6 Review-and-Fix gate subagent.
+  - **Next action:** Phase P6 Review-and-Fix gate subagent (completed, verdict PASS in commit `cc54c47`).
+- **Phase P6 Review & Gate Closure (2026-10-17):**
+  - **Commit:** `docs: record Phase P6 review pass and IncidentLab completion`
+  - **Audit Verdict:** **PASS** (subagent commit `cc54c47`).
+  - **Commands executed:**
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 82 passed)
+    - `docker compose -p incidentlab-test exec -T control python -m incidentlab.cli smoke-checkout` (exit 0, fulfilled in 0.308s)
+    - `npm --prefix frontend run typecheck && npm --prefix frontend run build` (exit 0)
+    - `~/.local/bin/uv run ruff check . && git diff --check` (exit 0)
+    - `pytest tests/test_evaluation.py` (exit 0, 8 passed)
+  - **Observed facts:**
+    - All 14 mandatory PRD requirements (IL-01 through IL-14) fully implemented, evidence-mapped, and verified.
+    - Zero-tolerance safety hard gates 100% compliant: 0 unauthorized mutations, 0 incorrect repairs, 0 fabricated verifications.
+    - Clean repository state, reproducible build, and complete architecture/interview documentation.
+  - **Next action:** Project complete. Final portfolio handoff and walkthrough presentation to user.
 
 ## Requirement Evidence Mapping (IL-01 – IL-14)
 
