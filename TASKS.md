@@ -370,8 +370,55 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
       - IL-T13: Frozen recipes in `evals/cases/dev.jsonl` (12 cases) and `evals/cases/heldout.jsonl` (18 cases, 6 per family: 6 inventory_config, 6 worker_paused, 6 upstream_maintenance) with 1-to-1 gold specifications in `evals/gold/` strictly match SHA-256 hashes in `evals/manifest.json`. Deterministic scorer `evals/score.py` verified to check authority binding, allowed actions, verifier fulfilled-order evidence, and citation existence/validity; rejects fabricated verifications, unauthorized repairs, and incorrect repairs. Isolated runner `evals/run.py` resets target cleanly and executes scenarios without leaking gold or fault-labels. Held-out split strictly marked `not_run`.
       - IL-T14: Fixed diagnostic baseline in `evals/baseline.py` executes exact 4 reads (`get_health` -> `get_logs` -> `get_config` -> `probe_checkout`), top-3 keyword retrieval, and 1 final schema call without fault-label shortcuts. Paired comparison CLI `--compare` in `evals/score.py` executed across all 12 dev cases (`artifacts/evals/dev_report.json`) reporting honest comparisons: 11/12 fixed (91.67%) vs 9/12 agent (75.0%), 100% relevant-section coverage, token metrics, and strict 0 unauthorized repairs and 0 fabricated verifications.
       - IL-T15: `.github/workflows/ci.yml` defines one lean offline CI job running Ruff, frontend typecheck, Vite build, database migrations, background sandbox service, and offline pytest (`-m 'not live_model'`) against PostgreSQL service container with no live model or paid inference calls. Security/integrity regressions pass offline (secret/tool boundary, prompt injection in logs, unauthorized repair refusal, verifier honesty, evaluation provenance). Docker COPY boundaries verified (eval image includes tests/evals, runtime image excludes test/eval trees, `.dockerignore` excludes secrets/artifacts/caches).
-    - Audit Verdict: **PASS**. P4 gate passed. Transitioning to Phase P5.
-  - **Next action:** Execute IL-T16: measure one qualified serving configuration.
+- **IL-T16 (2026-10-16):**
+  - **Commit:** `perf: measure local inference quality and latency` (`b8cc191`)
+  - **Files:** `evals/benchmark.py`, `src/incidentlab/model.py`, `src/incidentlab/events.py`, `evals/README.md`, `README.md`.
+  - **Commands executed:**
+    - `docker run --rm --network incidentlab-test_default --env-file .env -v $(pwd)/src:/app/src -v $(pwd)/evals:/app/evals -v $(pwd)/artifacts:/app/artifacts incidentlab-eval:local python -m evals.benchmark --split dev --sample representative-six --warm-repeats 3` (exit 0)
+    - Recomputed throughput sample: `199 tokens / 31.56s = 6.31 tokens/s` matching provider metric.
+    - `docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 77 passed, 2 deselected)
+    - `uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Concurrency 1 monotonic timers, provider durations, streaming TTFT, memory sampling at 0.1s interval.
+    - Cold-load observation + 18 warm observations (3 repeats of 6 representative development inputs) recorded in `artifacts/benchmarks/dev_benchmark.json` and `artifacts/benchmarks/bm-1792168104/`.
+    - Active Wall-Clock: p50 = 34.66s, p95 = 48.80s, max = 52.45s (target < 240s, 100% compliant).
+    - Model Generation Duration: p50 = 33.36s, p95 = 36.10s, avg = 32.59s.
+    - Output Throughput: p50 = 6.24 tokens/s, p95 = 6.31 tokens/s (CPU compute).
+    - Streaming TTFT: p50 = 0.26s, p95 = 0.28s (timed on first non-empty content chunk).
+    - Paid Inference API Calls: 0 ($0.00, 100% local hardware).
+    - Peak RAM: 14.9 GB (Host RAM: 125 GiB).
+
+- **IL-T17 (2026-10-16):**
+  - **Commit:** `feat: clarify evidence approval and recovery outcomes` (`45f7794`)
+  - **Files:** `frontend/src/App.tsx`, `frontend/src/types.ts`, `frontend/src/styles.css`, `tests/test_api.py`.
+  - **Commands executed:**
+    - `npm --prefix frontend run typecheck && npm --prefix frontend run build` (exit 0, clean build in 308ms)
+    - `docker run --rm --network incidentlab-test_default --env-file .env -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests incidentlab-eval:local uv run pytest tests/test_api.py` (exit 0, 12 passed)
+    - `docker run --rm --network incidentlab-test_default --env-file .env -v $(pwd)/src:/app/src -v $(pwd)/tests:/app/tests incidentlab-eval:local uv run pytest -m 'not live_model'` (exit 0, 82 passed, 2 deselected in 10.23s)
+    - `uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Resilient read-only polling: network interruption or transient error preserves prior evidence and events without replaying mutations.
+    - Keyboard accessibility: Escape key closes evidence modal; focus-visible indicators; aria labels on interactive elements.
+    - Derived telemetry display: model duration, tool execution duration/reads, throughput (tokens/s), and proposal approval wait duration.
+    - Token-free copy handler: `handleCopySummary` copies audit records, diagnosis, citations, and receipt to clipboard with zero credentials or tokens exposed.
+    - Explicit actionable banners for all 9 states: `verified_recovered`, `verification_failed`, `escalated`, `rejected`, `cancelled`, `expired`, `failed`, `execution_unknown` (read-only reconcile + operator CLI command displayed), and `closed_unknown`.
+    - Unit tests confirm cancellation transitions, reconcile 404 handling, and token absence from error responses and events.
+
+- **IL-T18 (2026-10-16):**
+  - **Commit:** `docs: verify clean setup and publish demo guide` (`9408bb6`)
+  - **Files:** `README.md`, `.env.example`, `compose.yaml`, `src/incidentlab/cli.py`, `src/incidentlab/db.py`.
+  - **Commands executed:**
+    - Rehearsed clean setup in separate Compose project `incidentlab-clean` with fresh named volumes and freshly generated local secrets.
+    - Schema migrations executed: `docker compose -p incidentlab-clean --env-file .env run --rm -v $(pwd)/src:/app/src -e IL_MIGRATION_DATABASE_URL control uv run python -m incidentlab.cli migrate` (exit 0).
+    - Runbooks indexed: `docker compose -p incidentlab-clean --env-file .env run --rm -v $(pwd)/src:/app/src control uv run python -m incidentlab.cli index-runbooks` (exit 0, 15 sections indexed).
+    - Services started: `docker compose -p incidentlab-clean --env-file .env up -d` (exit 0).
+    - Healthy checkout verified: `docker compose -p incidentlab-clean exec -T control python -m incidentlab.cli smoke-checkout` (exit 0, fulfilled in 0.389s).
+    - Fault injected and full recovery demo completed: `docker compose -p incidentlab-clean exec -T control python -m incidentlab.cli smoke-demo --family inventory_config --approval approve` (exit 0, real Ollama CPU inference, proposal generated, approved, single repair dispatched, verified new fulfilled checkout order `9ffaea50-3e5b-4443-83d9-343b089c9a80`).
+    - Teardown: `docker compose -p incidentlab-clean down -v` and network cleanup (exit 0).
+    - Documentation updated with prerequisites, licence/model pin, known limits, short demo, and concise architecture notes.
+    - `git diff --check` and `uv run ruff check .` passed with 0 errors.
+
+- **Next action:** Invoke Phase P5 Review-and-Fix subagent to audit IL-T16, IL-T17, and IL-T18 before gate transition to Phase P6.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.
