@@ -26,7 +26,7 @@
       "cases_sha256": "9bf5303fab0b6dec9428096823f4c60f0a122fdb89dd8b38fd1a873f15088342",
       "gold_file": "evals/gold/heldout.jsonl",
       "gold_sha256": "0f8347c0aace5c3906a13ff7282a57877509ae5aa3d34da8f88cd8368b74841c",
-      "status": "not_run"
+      "status": "evaluated"
     }
   },
   "runbooks": {

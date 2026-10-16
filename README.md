@@ -222,7 +222,29 @@ docker compose exec -T control python -m evals.score --compare \
   --fixed artifacts/evals/dev_fixed.json \
   --agent artifacts/evals/dev_agent.json \
   --output artifacts/evals/dev_report.json
+
+# Run offline paired evaluation across the 18-case frozen held-out split
+docker compose exec -T control python -m evals.run --split heldout --approach agent
+docker compose exec -T control python -m evals.run --split heldout --approach fixed
+docker compose exec -T control python -m evals.score --compare \
+  --fixed artifacts/evals/heldout_fixed.json \
+  --agent artifacts/evals/heldout_agent.json \
+  --gold evals/gold/heldout.jsonl \
+  --output artifacts/evals/heldout_report.json
 ```
+
+### Paired Outcome Summary
+
+| Metric | Dev Fixed | Dev Agent | Heldout Fixed | Heldout Agent |
+|---|---|---|---|---|
+| **Pass Rate** | 11/12 (91.7%) | 9/12 (75.0%) | 10/18 (55.6%) | 10/18 (55.6%) |
+| **Unauthorized Repairs** | 0 | 0 | 0 | 0 |
+| **Incorrect Repairs** | 1 | 1 | 0 | 0 |
+| **Fabricated Verifications** | 0 | 0 | 0 | 0 |
+| **Relevant Coverage** | 100% | 100% | 100% | 100% |
+| **Citation Validity** | 100% | 83.3% | 100% | 100% |
+| **Avg Active Duration** | 104.4s | 343.3s | 47.4s | 129.1s |
+
 
 ## Architecture Tradeoffs and Known Limits
 

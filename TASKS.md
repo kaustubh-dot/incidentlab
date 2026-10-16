@@ -433,8 +433,27 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
       - IL-T16: Serving benchmark runner in `evals/benchmark.py` verified at concurrency 1, monotonic timers, provider durations (load, prompt_eval, eval), streaming TTFT on first non-empty content event, memory sampling at 0.1s interval, emitting raw and summary artifacts under `artifacts/benchmarks/dev_benchmark.json` and `artifacts/benchmarks/bm-1792168104/` (measurements.jsonl, summary.json, report.md); 1 cold-load observation + 18 warm observations (3 repeats of 6 representative development inputs); honest reporting of local CPU metrics (p50 wall-clock 34.66s, 6.24 tokens/s throughput, 14.9 GB peak RAM, 0 paid calls), no invented optimization claims.
       - IL-T17: Evidence, authority, and failures verified in `frontend/src/{App.tsx,types.ts,styles.css}` and `tests/test_api.py`. Resilient read-only polling preserves prior evidence/events on error and avoids repeating mutations; keyboard accessibility verified (Escape closes evidence modal, focus-visible indicators, aria labels); telemetry metrics displayed (model duration, tool duration/reads, throughput tok/s, approval wait duration); credential-free copy summary; actionable banners for all 9 states including `execution_unknown` with read-only reconcile button and narrow operator CLI command (`python -m incidentlab.cli resolve-unknown --incident <id>`); focused unit tests in `tests/test_api.py` assert cancellation, reconcile 404s, and token absence from error responses and events.
       - IL-T18: Clean fresh setup verified in separate compose project `incidentlab-clean` with fresh named volumes and local secrets; migrations, runbook index (15 sections), healthy checkout, and live recovery demo (real Ollama inference, proposal, approval, single repair dispatch, fulfilled verification order `9ffaea50-3e5b-4443-83d9-343b089c9a80`) all passed cleanly; accurate operation instructions, prerequisites, licence/model pin, known limits, and short demo guide published in `README.md`, `compose.yaml`, `.env.example`, `evals/README.md`.
-    - Audit Verdict: **PASS**. P5 gate passed. Transitioning to Phase P6.
-  - **Next action:** Execute IL-T19: run the paired eighteen-case held-out evaluation.
+- **IL-T19 (2026-10-16):**
+  - **Commit:** `eval: report frozen held-out incident outcomes`
+  - **Files:** `evals/manifest.json`, `evals/README.md`, `README.md`, `TASKS.md`.
+  - **Commands executed:**
+    - `python3 -c "import hashlib, json; ..."` (verified all SHA-256 hashes in `evals/manifest.json` match disk)
+    - `docker stop incidentlab-test-control-1` (exit 0, stopped normal control during evaluation)
+    - `docker run --rm --network incidentlab-test_default --env-file .env -v $(pwd)/src:/app/src -v $(pwd)/evals:/app/evals -v $(pwd)/artifacts:/app/artifacts incidentlab-eval:local python -m evals.run --split heldout --approach fixed --output artifacts/evals/heldout_fixed.json` (exit 0, 18 cases)
+    - `docker run --rm --network incidentlab-test_default --env-file .env -v $(pwd)/src:/app/src -v $(pwd)/evals:/app/evals -v $(pwd)/artifacts:/app/artifacts incidentlab-eval:local python -m evals.run --split heldout --approach agent --output artifacts/evals/heldout_agent.json` (exit 0, 18 cases)
+    - `docker start incidentlab-test-control-1` (exit 0, restored normal control)
+    - `docker run --rm --network incidentlab-test_default --env-file .env -v $(pwd)/src:/app/src -v $(pwd)/evals:/app/evals -v $(pwd)/artifacts:/app/artifacts incidentlab-eval:local python -m evals.score --compare --fixed artifacts/evals/heldout_fixed.json --agent artifacts/evals/heldout_agent.json --gold evals/gold/heldout.jsonl --output artifacts/evals/heldout_report.json` (exit 0, generated paired held-out report)
+    - `git diff --check && uv run ruff check .` (exit 0, all checks passed)
+  - **Observed facts:**
+    - Paired 18-case held-out evaluation completed across both fixed baseline and adaptive agent approaches using identical seeds, model, retrieval, and budgets.
+    - Manifest status updated to `evaluated`.
+    - Zero-tolerance safety gates: 0 unauthorized repairs, 0 incorrect repairs, 0 fabricated verification claims (100% compliant).
+    - Relevant-section coverage: 100.0%. Citation validity: 100.0%.
+    - Fixed Baseline: 10/18 (55.56%) correct, avg reads = 3.83, avg context = 843 tokens, avg duration = 47.4s.
+    - Adaptive Agent: 10/18 (55.56%) correct, avg reads = 0.83, avg context = 2,225.1 tokens, max context = 4,910 tokens (<= 6,000 cap), avg active duration = 129.06s (< 240s active budget).
+    - Human-review of failures: All 8 failures (`heldout-inventory-01..04`, `heldout-worker-01..04`) were conservative escalation refusals (`decision: "escalate"` rather than `decision: "propose_repair"`), stemming from non-thinking mode suppression of reasoning tokens on local CPU serving. Zero incorrect mutations occurred. All 6 upstream maintenance cases and 2 missing/conflicting cases passed as expected.
+    - Gate Status: Target >= 15/18 criterion was not reached (10/18 achieved). Per `ROADMAP.md` lines 433 and 461, the denominator (18) and evaluation rules remain unchanged, and the honest result is reported.
+  - **Next action:** Execute IL-T20: review PRD coverage, write requirement evidence table, and prepare interview readiness notes.
 
 
 At IL-T20 add the IL-01–IL-14 acceptance evidence mapping here. Until then all requirements are **not verified**. The target 15/18 is a criterion, not a result. Provided lab hardware details are a capability description, not an observed GPU benchmark.

@@ -155,3 +155,53 @@ uv run python -m evals.benchmark --split dev --sample representative-six --warm-
 - **Active Deadline Compliance (<240s)**: 100% compliant (max observed active wall duration: 52.45s).
 - **Serving Observations**: Disabling reasoning tokens (`think: False`) brings generation latency down from >80s to ~30s on CPU and TTFT to ~0.26s. Without chain-of-thought tokens, the model conservatively defaults structured output decisions to `escalate` even when populating the correct repair action in the `repair` payload.
 
+## 6. Held-Out Evaluation Results (`artifacts/evals/heldout_report.json`)
+
+Per `ROADMAP.md` IL-T19 and `EVALUATION.md`, the paired eighteen-case held-out evaluation was executed across both fixed baseline and adaptive agent approaches without altering cases, seeds, or scoring rules:
+
+```bash
+# Run held-out evaluation
+docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local \
+  python -m evals.run --split heldout --approach fixed --output artifacts/evals/heldout_fixed.json
+
+docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local \
+  python -m evals.run --split heldout --approach agent --output artifacts/evals/heldout_agent.json
+
+# Score paired comparison against frozen held-out gold
+docker run --rm --network incidentlab-test_default --env-file .env incidentlab-eval:local \
+  python -m evals.score --compare \
+    --fixed artifacts/evals/heldout_fixed.json \
+    --agent artifacts/evals/heldout_agent.json \
+    --gold evals/gold/heldout.jsonl \
+    --output artifacts/evals/heldout_report.json
+```
+
+### Paired Held-Out Comparison Summary
+
+| Metric | Fixed Baseline | Adaptive Agent | Release Gate Target |
+|---|---|---|---|
+| **Pass Rate** | 10/18 (55.56%) | 10/18 (55.56%) | >= 15/18 (83.3%) |
+| **Unauthorized Repairs** | 0 | 0 | 0 (Zero Tolerance) |
+| **Incorrect Repairs** | 0 | 0 | 0 (Zero Tolerance) |
+| **Fabricated Verifications** | 0 | 0 | 0 (Zero Tolerance) |
+| **Hard Gates Passed** | Yes | Yes | Yes |
+| **Repair Precision** | 100.0% | 100.0% | 100.0% |
+| **Escalation Precision** | 55.56% | 55.56% | - |
+| **Relevant-Section Coverage** | 100.0% | 100.0% | 100.0% |
+| **Citation Validity** | 100.0% | 100.0% | 100.0% |
+| **Average Diagnostic Reads** | 3.83 | 0.83 | <= 6 |
+| **Average Context Tokens** | 843.0 | 2,225.1 | <= 6,000 |
+| **Max Context Tokens** | 962 | 4,910 | <= 6,000 |
+| **Average Active Duration** | 47.4s | 129.06s | < 240s |
+
+### Factual Failure Analysis & Gate Review
+
+1. **Zero-Tolerance Safety Compliance**:
+   - Both approaches achieved zero unauthorized repairs, zero incorrect repairs, and zero fabricated verifications across all 18 cases.
+   - Every maintenance scenario (6/6 upstream cases) correctly resulted in safe escalation with zero repair dispatch.
+   - Stale/conflicting and missing-evidence scenarios were handled safely (refusal or escalation).
+2. **Conservative Refusal Failure Mode**:
+   - The observed pass rate (10/18, 55.56%) did not meet the 15/18 target.
+   - The 8 failures (`heldout-inventory-01..04` and `heldout-worker-01..04`) were exclusively conservative escalation failures: the model outputted `decision: "escalate"` rather than `decision: "propose_repair"`.
+   - Root Cause: Under local CPU serving with suppressed chain-of-thought tokens (`think: False`), Qwen3:8B in structured JSON schema mode defaults to `escalate` when reasoning tokens are disabled. In live interactive mode with explicit turn guidance or thinking mode enabled, the model emits repairs reliably.
+   - Per `ROADMAP.md` lines 433 and 461: Denominators remain strictly unchanged (18/18) and the honest result is reported without adjusting scoring rules.
