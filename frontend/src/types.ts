@@ -44,11 +44,23 @@ export interface Proposal {
   evidence_ids: string[];
 }
 
+export interface RunbookCitation {
+  runbook_id: string;
+  source_version: string;
+  section_id: string;
+}
+
 export interface Diagnosis {
-  hypothesis: string;
-  uncertainty: string;
-  cited_evidence_ids: string[];
-  cited_runbook_sections: string[];
+  summary?: string;
+  confidence?: "high" | "medium" | "low";
+  evidence_ids?: string[];
+  runbook_citations?: RunbookCitation[];
+  decision?: "propose_repair" | "escalate";
+  repair?: RepairPayload | null;
+  uncertainty?: string;
+  hypothesis?: string;
+  cited_evidence_ids?: string[];
+  cited_runbook_sections?: string[];
 }
 
 export interface IncidentView {

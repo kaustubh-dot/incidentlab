@@ -187,3 +187,76 @@ def test_event_ordering_and_active_incident_constraint():
             )
         conn.rollback()  # Clean up test rows
 
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cancel_nonexistent_incident_returns_404(live_settings):
+    app = create_app(live_settings)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {live_settings.il_owner_token}"}
+        response = await client.post(
+            "/api/v1/incidents/00000000-0000-0000-0000-000000000001/cancel",
+            headers=headers,
+        )
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"]["code"] == "incident_not_found"
+        assert live_settings.il_owner_token not in str(data)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reconcile_nonexistent_execution_returns_404(live_settings):
+    app = create_app(live_settings)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {live_settings.il_owner_token}"}
+        response = await client.post(
+            "/api/v1/incidents/00000000-0000-0000-0000-000000000001/reconcile",
+            headers=headers,
+        )
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"]["code"] == "execution_not_found"
+        assert live_settings.il_owner_token not in str(data)
+
+
+
+@pytest.mark.asyncio
+async def test_error_responses_never_echo_credentials(test_settings):
+    app = create_app(test_settings)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Invalid bearer token
+        secret_attempt = "super-secret-user-token-12345"
+        headers = {"Authorization": f"Bearer {secret_attempt}"}
+        response = await client.get(
+            "/api/v1/incidents/00000000-0000-0000-0000-000000000001",
+            headers=headers,
+        )
+        assert response.status_code == 401
+        data = response.json()
+        assert secret_attempt not in str(data)
+        assert test_settings.il_owner_token not in str(data)
+        assert data["error"]["code"] == "unauthorized"
+
+
+def test_telemetry_keys_preserved_in_redaction():
+    payload = {
+        "token": "secret-auth-token",
+        "input_tokens": 1420,
+        "output_tokens": 85,
+        "token_count": 1505,
+        "tokens_per_second": 28.5,
+        "authorization": "Bearer secret",
+    }
+    redacted = redact_sensitive_data(payload)
+    assert redacted["token"] == "[REDACTED]"
+    assert redacted["authorization"] == "[REDACTED]"
+    assert redacted["input_tokens"] == 1420
+    assert redacted["output_tokens"] == 85
+    assert redacted["token_count"] == 1505
+    assert redacted["tokens_per_second"] == 28.5
+
+
