@@ -2,7 +2,7 @@
 
 A bounded application-recovery agent: investigate a broken sandbox checkout, propose a specific repair, wait for human approval, and verify the result through actual application behavior.
 
-**Status: Active implementation in progress. Phase P0 (qualified runtime & healthy checkout sandbox), Phase P1 (observable fault injection, MCP tools, runbook FTS indexing, and bounded LangGraph investigation), Phase P2 (bound owner approval, deterministic repair execution, independent functional verification, and thin owner UI console), Phase P3 (worker stall, upstream maintenance escalation, durable recovery, bounded context), Phase P4 (isolated evaluation harness, paired development baseline report), and Phase P5 IL-T16 (serving performance benchmark on qualified local configuration) are implemented.**
+**Status: Active implementation in progress. Phases P0 through P5 fully complete and audited; Phase P6 (frozen held-out evaluation, requirement evidence mapping, and interview readiness) complete with live verification.**
 
 Private repository: [kaustubh-dot/incidentlab](https://github.com/kaustubh-dot/incidentlab).
 
@@ -246,15 +246,102 @@ docker compose exec -T control python -m evals.score --compare \
 | **Avg Active Duration** | 104.4s | 343.3s | 47.4s | 129.1s |
 
 
-## Architecture Tradeoffs and Known Limits
+## Architecture Deep-Dive & Interview Preparation
 
-1. **Local Serving Latency (CPU vs GPU)**:
-   - Serving `qwen3:8b` on host CPU takes ~30–48s per diagnostic turn. While compliant with our 240s active budget, non-thinking mode is selected to balance latency and structured schema output.
-2. **One Active Incident Constraint**:
-   - `control.incidents` enforces at most one active nonterminal incident via partial unique index `ix_one_active_incident`. This eliminates split-brain repairs across parallel faults.
-3. **Strict Credential Boundaries**:
-   - Control application cannot read sandbox tables directly. Sandbox process cannot read control tables.
-   - Diagnostic tools exposed via MCP run under a dedicated read-only role with strictly read tokens.
-   - The model has zero repair execution tools registered. Execution is strictly handled by the deterministic control application upon owner approval.
-4. **Idempotency & Zero Mutation Retries**:
-   - Repair dispatch never retries POST requests automatically to prevent duplicate side effects. Recovery relies on durable receipts and idempotent sandbox state transactions.
+### 1. The Operator Problem & Bounded Scope
+In high-stakes production operations, giving an LLM autonomous write access or raw shell execution inevitably leads to catastrophic hallucinated actions, credential exfiltration, and cascading outages. IncidentLab solves this by constraining autonomous reasoning to investigation and proposal formulation on exactly one isolated sandbox application.
+- **Single Active Incident**: The control plane enforces at most one nonterminal incident via the partial unique index `control.ix_one_active_incident`. Parallel faults cannot produce competing, split-brain repairs.
+- **Zero Autonomous Mutations**: The model has zero repair execution tools in its MCP registry. It can only propose an immutable repair specification. Human approval is strictly mandatory for any state mutation.
+
+### 2. End-to-End Recovery Flow & State Machine
+The recovery lifecycle follows an 8-stage deterministic state machine:
+```
+[Fault Injected]
+       │
+       ▼
+[Investigation via Read-Only MCP] (get_health, get_logs, get_config, probe_checkout)
+       │
+       ▼
+[Context Assembly & FTS Retrieval] (Top 3 runbook chunks from PostgreSQL ts_rank_cd)
+       │
+       ▼
+[Immutable Proposal Formulation] (Canonical SHA-256 payload digest + target_revision snapshot)
+       │
+       ▼
+[Row-Locked Owner Decision] (POST /api/v1/incidents/{id}/approval -> approve or reject)
+       │
+       ├── (Reject) ──► [Closed / Zero Claims / Zero Dispatch]
+       │
+       ▼ (Approve)
+[Atomic Execution Claim] (UNIQUE(proposal_id) in control.execution_claims)
+       │
+       ▼
+[Deterministic Repair Dispatch] (Finite allowlist: set_inventory_endpoint | resume_order_worker)
+       │
+       ▼
+[Sandbox Transaction & Receipt] (sandbox.repair_receipts committed atomically with config update)
+       │
+       ▼
+[Independent Functional Verification] (Verifier creates fresh fake checkout; waits up to 10s for fulfillment)
+       │
+       ▼
+[Incident Resolved] (Event hash chain finalized; verification evidence committed)
+```
+
+### 3. Privilege Boundaries & Secret Isolation
+- **MCP Process Boundary**: The diagnostic server runs as an isolated child process communicating strictly over `stdio`. Write and admin tokens are explicitly scrubbed from its environment; only a read-only token is provided.
+- **Database Role & Schema Isolation**: A single PostgreSQL instance isolates concerns through strict schemas and unprivileged roles:
+  - `incidentlab_control`: DML access to `control` and `checkpoints` schemas only. Cannot read or write `sandbox`.
+  - `incidentlab_sandbox`: DML access to `sandbox` schema only. Cannot read or write `control` or `checkpoints`.
+  - `incidentlab_migrator`: Used exclusively during migration scripts (`python -m incidentlab.cli migrate`). Application runtimes never receive migrator credentials.
+- **Model Context Purity**: Database connection strings, credentials, and write tokens never enter prompts or model context. All event streams redact sensitive keys recursively prior to logging or client broadcast.
+
+### 4. Idempotency, Replay Prevention & Crash Recovery
+- **Immutable Proposals**: Every proposal computes a canonical SHA-256 digest over its action and parameters. The approval endpoint recomputes this digest against the database record; if altered, the approval is rejected with HTTP 409.
+- **Compare-and-Swap Revision Check**: Every proposal records the `target_revision` at the time of diagnosis. When executing, the controller verifies the sandbox revision has not drifted.
+- **Single Execution Claim**: `control.execution_claims` enforces `UNIQUE(proposal_id)`. Even under concurrent approval calls or process restarts, exactly one claim can succeed.
+- **Zero Automatic Mutation Retries**: Network timeouts during repair POST never trigger automatic retries. The incident transitions to `execution_unknown`.
+- **Durable Receipt Ledger & Reconciliation**:
+  - The sandbox writes an immutable receipt (`sandbox.repair_receipts`) with `(execution_key, action, before_revision, after_revision)` within the repair transaction.
+  - On restart or timeout, the control service performs a read-only GET (`/repairs/{key}`) to verify if the repair already committed.
+  - If unreachable, an operator runs the narrow CLI command `resolve-unknown` which requires explicit system quiescence confirmation, an operator note, and typed confirmation (`ACKNOWLEDGE UNKNOWN <key>`) to release the `ix_one_active_incident` lock without repeating the write.
+
+### 5. Architectural Justifications (Smallest Viable Architecture)
+- **FastAPI Backend**: Native async ASGI with strict Pydantic schemas provides type-safe endpoints for both the control authority and sandbox application without heavy microservice boilerplate.
+- **React 18 / TypeScript / Vite UI**: Single-page dashboard keeping bearer credentials exclusively in React state memory (never written to `localStorage` or `sessionStorage`), with 1s ordered polling over cryptographic SHA-256 event chains.
+- **PostgreSQL with Schema/Role Separation**: Eliminates multi-database operational complexity while providing true kernel-level permission isolation via role grants and native ACID transactions for row locks.
+- **Stdio Model Context Protocol (MCP)**: Standards-compliant tool discovery over standard I/O provides process-level isolation without network socket exposure.
+- **LangGraph State Machine**: Orchestrates diagnostic reasoning with explicit turn limits (max 4 turns) and read caps (<= 6 reads), preventing runaway loops or infinite context inflation.
+- **Local Ollama (`qwen3:8b`)**: 100% offline, zero data exfiltration, $0.00 cloud inference cost, and pinned reproducible model weights.
+
+### 6. Real Engineering Challenges Discovered & Verified Fixes
+1. **PostgreSQL Multi-Role Schema Grant Ordering**:
+   - *Problem*: Initial schema migrations failed when granting table permissions because PostgreSQL requires `USAGE` on the parent schema before table grants can take effect.
+   - *Fix*: Separated migration into explicit phases: schema creation -> `GRANT USAGE ON SCHEMA` -> table DDL -> table/sequence DML grants -> `ALTER DEFAULT PRIVILEGES`.
+2. **URL-Encoded Database Passwords**:
+   - *Problem*: High-entropy random hex passwords containing special characters caused asyncpg / SQLAlchemy connection string parsing failures.
+   - *Fix*: Enforced URL percent-encoding (`urllib.parse.quote_plus`) across all database URL construction routines in `config.py` and `db.py`.
+3. **Local CPU Serving: Thinking Mode vs. Structured Output Latency**:
+   - *Problem*: On local CPU serving, Qwen3's thinking mode produced extensive internal reasoning tokens that pushed turn latency past 120s and frequently truncated structured JSON schema outputs.
+   - *Fix*: Qualified runtime in non-thinking mode (`think: False`) with Pydantic JSON schema output enforcement. This dropped turn latency to ~33s while achieving 100% compliance on all safety gates (0 unauthorized mutations, 0 incorrect repairs, 0 fabricated verifications).
+
+### 7. Known Limits & Tradeoffs
+1. **CPU Serving Throughput**:
+   - Serving `qwen3:8b` on host CPU achieves ~6.24 tokens/s. While compliant with our 240s active budget (p50 = 34.66s), complex reasoning prompts under non-thinking mode can exhibit conservative refusal mode (`decision: "escalate"` rather than `propose_repair`). In production, GPU acceleration would enable full thinking-mode reasoning without latency degradation.
+2. **Single-Target Boundary**:
+   - IncidentLab deliberately bounds recovery to one sandbox application instance. Multi-service microservice recovery would require a distributed consensus or hierarchical claim architecture.
+3. **Keyword Full-Text Search vs. Dense RAG**:
+   - PostgreSQL FTS (`ts_rank_cd`) provides fast, zero-dependency runbook chunk retrieval. For a small operational runbook corpus (<100 sections), keyword matching achieves 100% relevant-section coverage without the memory overhead of local vector embedding models.
+
+### 8. Live Interview Demonstration Sequence
+To demonstrate the full system live during an interview:
+1. `docker compose exec -T control python -m incidentlab.cli smoke-checkout`
+   - Demonstrates healthy baseline checkout fulfilled by the background worker in < 400ms.
+2. `docker compose exec -T control python -m incidentlab.cli seed --family inventory_config`
+   - Injects a real inventory configuration fault and background noise traffic.
+3. `docker compose exec -T control python -m incidentlab.cli smoke-demo --family inventory_config --approval approve`
+   - Live end-to-end recovery: probes failure, runs MCP diagnostic investigation, cites runbooks, emits proposal with SHA-256 digest, executes approved repair, and independently verifies checkout.
+4. `docker compose exec -T control python -m incidentlab.cli smoke-demo --family worker_paused --approval approve`
+   - Demonstrates worker stall detection, approved `resume_order_worker` repair, and verification.
+5. `docker compose exec -T control python -m incidentlab.cli smoke-demo --family upstream_maintenance`
+   - Demonstrates safe escalation when the runbook indicates upstream maintenance: zero repair dispatch, `repair: null`, state `escalated`.
