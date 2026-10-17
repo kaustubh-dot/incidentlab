@@ -430,23 +430,33 @@ async def execute_claim(
                     (claim.incident_id,),
                 )
             else:
-                # Precondition failed -> stale/failed
+                # Precondition failed -> stale (IL-AUD-006)
                 cur.execute(
                     """
                     UPDATE control.incidents
-                    SET state = 'failed', updated_at = NOW(),
+                    SET state = 'stale', updated_at = NOW(),
                         outcome = %s
                     WHERE id = %s
                     """,
                     (
                         Jsonb(
                             {
+                                "status": "stale",
                                 "error": "precondition_failed",
                                 "receipt": receipt.model_dump(mode="json"),
                             }
                         ),
                         claim.incident_id,
                     ),
+                )
+                record_event(
+                    conn,
+                    claim.incident_id,
+                    "error",
+                    {
+                        "code": "precondition_failed",
+                        "message": "Repair target revision stale; precondition failed in sandbox",
+                    },
                 )
             conn.commit()
 
@@ -664,7 +674,7 @@ async def reconcile_startup(
                 LEFT JOIN control.proposals p ON i.id = p.incident_id
                 WHERE i.state NOT IN (
                     'verified_recovered', 'verification_failed', 'escalated',
-                    'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                    'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
                 )
                 """
             )
@@ -756,6 +766,18 @@ async def reconcile_startup(
                             "execution_key": exec_key,
                             "action": "execution_unknown",
                         })
+                elif exec_state == "applied" and inc_state == "verifying":
+                    # IL-AUD-005: Resume verify_checkout without re-dispatching repair POSTs
+                    from incidentlab.verifier import verify_checkout
+
+                    v_res = await verify_checkout(
+                        inc_id, exec_key, settings=settings, client=client
+                    )
+                    results.append({
+                        "incident_id": inc_id,
+                        "execution_key": exec_key,
+                        "action": f"resumed_verification_{v_res.verdict}",
+                    })
                 elif exec_state == "claimed":
                     results.append({
                         "incident_id": inc_id,

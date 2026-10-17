@@ -287,7 +287,7 @@ def get_diagnostics_logs(
                 """
                 SELECT seq, timestamp, request_id, order_id, event_kind, severity, message, data
                 FROM sandbox.logs
-                WHERE request_id = %s
+                WHERE request_id = %s OR request_id IS NULL OR event_kind = 'background_noise'
                 ORDER BY seq ASC
                 LIMIT %s
                 """,

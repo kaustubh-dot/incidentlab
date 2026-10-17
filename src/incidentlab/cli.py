@@ -826,20 +826,28 @@ def main():
                     sys.stderr.write(f"Reset failed: {r.text}\n")
                     return 1
 
-            # Clean active incidents in control DB
+            # Check for active nonterminal incidents in control DB (IL-AUD-004)
             with get_control_connection(settings) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        UPDATE control.incidents
-                        SET state = 'closed_unknown'
+                        SELECT id, state
+                        FROM control.incidents
                         WHERE state NOT IN (
                             'verified_recovered', 'verification_failed', 'escalated',
-                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
                         )
+                        LIMIT 1
                         """
                     )
-                conn.commit()
+                    active_inc = cur.fetchone()
+                    if active_inc:
+                        sys.stderr.write(
+                            f"Active non-terminal incident exists "
+                            f"({active_inc[0]}, state='{active_inc[1]}'). "
+                            "smoke-demo fails closed. Resolve or close active incident first.\n"
+                        )
+                        return 1
 
             # 2. Inject fault family
             sys.stderr.write(f"2. Injecting fault family '{args.family}'...\n")

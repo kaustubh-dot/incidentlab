@@ -96,14 +96,20 @@ async def call_model(
     tools: list[dict[str, Any]],
     final_schema: dict[str, Any] | None = None,
     settings: Settings | None = None,
+    timeout_seconds: float | None = None,
 ) -> ModelResult:
     """Execute native Ollama chat request with explicit timeout and accounting."""
     if settings is None:
         settings = Settings.from_env()
 
+    effective_timeout = (
+        float(timeout_seconds)
+        if timeout_seconds is not None
+        else float(settings.il_model_timeout_seconds)
+    )
     client = ollama.AsyncClient(
         host=settings.il_ollama_base_url,
-        timeout=float(settings.il_model_timeout_seconds),
+        timeout=effective_timeout,
     )
 
     # Qualified bounded options: think=false disables Qwen thinking; bound output tokens
@@ -128,7 +134,7 @@ async def call_model(
 
         response = await client.chat(**kwargs)
     except httpx.TimeoutException as exc:
-        msg = f"Model call timed out after {settings.il_model_timeout_seconds}s"
+        msg = f"Model call timed out after {effective_timeout}s"
         raise ModelTimeoutError(msg) from exc
     except (
         httpx.ConnectError,

@@ -110,8 +110,28 @@ async def verify_checkout(
                 result.model_dump(mode="json"),
             )
 
+            # Durable applied execution receipt check (IL-AUD-003)
+            cur.execute(
+                """
+                SELECT execution_key, state, receipt
+                FROM control.executions
+                WHERE incident_id = %s
+                ORDER BY claimed_at DESC
+                LIMIT 1
+                """,
+                (incident_id,),
+            )
+            exec_row = cur.fetchone()
+            has_applied_receipt = (
+                exec_row is not None
+                and exec_row[1] == "applied"
+                and exec_row[2] is not None
+                and isinstance(exec_row[2], dict)
+                and exec_row[2].get("result") == "applied"
+            )
+
             # Update incident state
-            if verdict == "pass":
+            if verdict == "pass" and has_applied_receipt:
                 cur.execute(
                     """
                     UPDATE control.incidents
@@ -124,10 +144,49 @@ async def verify_checkout(
                             {
                                 "status": "verified_recovered",
                                 "verification": result.model_dump(mode="json"),
+                                "execution_key": str(exec_row[0]),
                             }
                         ),
                         incident_id,
                     ),
+                )
+            elif verdict == "pass" and not has_applied_receipt:
+                # Fresh checkout passed but no applied repair receipt exists!
+                # PRD IL-08/IL-09 & IL-AUD-003: Recovery requires bound applied receipt.
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'failed', updated_at = NOW(),
+                        outcome = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        Jsonb(
+                            {
+                                "status": "failed",
+                                "reason": "unbound_recovery_refused",
+                                "message": (
+                                    "Fresh checkout passed but no applied repair receipt is bound "
+                                    "to this incident. Green health/order alone cannot declare "
+                                    "recovery."
+                                ),
+                                "verification": result.model_dump(mode="json"),
+                            }
+                        ),
+                        incident_id,
+                    ),
+                )
+                record_event(
+                    conn,
+                    incident_id,
+                    "error",
+                    {
+                        "code": "unbound_recovery_refused",
+                        "message": (
+                            "Recovery refused: fresh checkout succeeded without a bound "
+                            "applied repair receipt"
+                        ),
+                    },
                 )
             else:
                 cur.execute(

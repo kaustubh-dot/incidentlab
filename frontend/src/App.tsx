@@ -67,6 +67,7 @@ export default function App() {
       "expired",
       "cancelled",
       "closed_unknown",
+      "stale",
     ].includes(state);
   };
 
@@ -354,9 +355,14 @@ export default function App() {
   const proposalCreatedAt = incident?.proposal
     ? new Date(incident.proposal.created_at).getTime()
     : 0;
-  const approvalDecidedEvent = events.find((e) => e.event_type === "approval_decided");
+  const approvalDecidedEvent = events.find(
+    (e) =>
+      e.event_type === "proposal_approved" ||
+      e.event_type === "proposal_rejected" ||
+      e.event_type === "approval_decided"
+  );
   const decidedAt = approvalDecidedEvent
-    ? new Date(approvalDecidedEvent.created_at).getTime()
+    ? new Date(approvalDecidedEvent.timestamp || (approvalDecidedEvent as any).created_at).getTime()
     : (incident && isTerminal(incident.state)
         ? new Date(incident.updated_at).getTime()
         : currentTime);
@@ -913,8 +919,26 @@ export default function App() {
                   <span className="badge badge-purple">CANCELLED</span>
                 </div>
                 <p style={{ marginTop: "0.25rem" }}>
-                  Active investigation turn was terminated upon operator cancellation request.
-                  Zero sandbox side effects or repair claims were dispatched. Safe to reset sandbox or start fresh checkout.
+                  {(incident.outcome as any)?.effect === "applied"
+                    ? "Incident was cancelled after an in-flight repair was applied to the sandbox. Sandbox configuration was mutated; verification was not executed."
+                    : "Active investigation turn was terminated upon operator cancellation request. Zero sandbox side effects or repair claims were dispatched. Safe to reset sandbox or start fresh checkout."}
+                </p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {incident && incident.state === "stale" && (
+          <section className="panel full-width" style={{ borderColor: "var(--accent-red)" }}>
+            <div className="alert alert-danger">
+              <div style={{ width: "100%" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong>Repair Precondition Failed (Target Revision Stale)</strong>
+                  <span className="badge badge-red">STALE</span>
+                </div>
+                <p style={{ marginTop: "0.25rem" }}>
+                  The proposal's expected target revision does not match the current sandbox revision.
+                  The sandbox state changed before this repair was dispatched. Mutation refused.
                 </p>
               </div>
             </div>
@@ -1102,9 +1126,9 @@ export default function App() {
                   <div className="timeline-header">
                     <span className="timeline-type">{ev.event_type}</span>
                     <span className="timeline-meta">
-                      Seq #{ev.seq} • {new Date(ev.created_at).toLocaleTimeString()}
-                      {ev.duration_ms !== null && ` • ${ev.duration_ms}ms`}
-                      {ev.input_tokens !== null && ` • in:${ev.input_tokens}`}
+                      Seq #{ev.seq} • {new Date(ev.timestamp || (ev as any).created_at).toLocaleTimeString()}
+                      {ev.duration_ms !== null && ev.duration_ms !== undefined && ` • ${ev.duration_ms}ms`}
+                      {ev.token_count !== null && ev.token_count !== undefined && ` • tokens:${ev.token_count}`}
                     </span>
                   </div>
                   <pre className="timeline-details">{JSON.stringify(ev.payload, null, 2)}</pre>

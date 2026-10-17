@@ -382,24 +382,27 @@ def check_citation_validity(artifact: CaseArtifact) -> tuple[bool, list[str]]:
 
     known_chunks: set[Any] = set()
     for rb in artifact.retrieved_runbooks:
-        src = (rb.get("source") or "").lower()
-        sec = (rb.get("section_id") or "").lower()
-        cid = (rb.get("chunk_id") or "").lower()
-        known_chunks.add((src, sec))
+        src = (rb.get("source") or "").lower().strip()
+        ver = str(rb.get("source_version") or "").lower().strip()
+        sec = (rb.get("section_id") or "").lower().strip()
+        cid = (rb.get("chunk_id") or "").lower().strip()
+        known_chunks.add((src, ver, sec))
         known_chunks.add(cid)
 
     # Fallback to proposal evidence_ids
     if not known_chunks and artifact.proposal:
         for eid in artifact.proposal.get("evidence_ids", []):
             if "rb" in eid:
-                clean_eid = eid.lower().replace("ev_rb_", "")
+                clean_eid = eid.lower().replace("ev_rb_", "").strip()
                 known_chunks.add(clean_eid)
 
     issues: list[str] = []
     for cit in citations:
         rb_id = str(cit.get("runbook_id", "")).strip().lower()
         sec_id = str(cit.get("section_id", "")).strip().lower()
-        if not rb_id or not sec_id:
+        cit_ver = str(cit.get("source_version", "")).strip().lower()
+
+        if not rb_id or not sec_id or not cit_ver:
             issues.append(f"Malformed runbook citation missing fields: {cit}")
             continue
 
@@ -412,15 +415,26 @@ def check_citation_validity(artifact: CaseArtifact) -> tuple[bool, list[str]]:
             resolved = False
             for k in known_chunks:
                 if isinstance(k, tuple):
-                    if base_rb == k[0] and (sec_id == k[1] or sec_id in k[1] or k[1] in rb_id):
+                    k_src, k_ver, k_sec = k
+                    if (
+                        (base_rb == k_src or base_rb in k_src)
+                        and (cit_ver == k_ver or not cit_ver)
+                        and (sec_id == k_sec or sec_id in k_sec or k_sec in sec_id)
+                    ):
                         resolved = True
                         break
                 elif isinstance(k, str):
-                    if base_rb in k and (sec_id in k or k.endswith(sec_id) or sec_id in rb_id):
+                    if (
+                        base_rb in k
+                        and sec_id in k
+                        and (cit_ver in k if cit_ver else True)
+                    ):
                         resolved = True
                         break
             if not resolved:
-                issues.append(f"Citation {rb_id}:{sec_id} not found in retrieved runbook chunks")
+                issues.append(
+                    f"Citation {rb_id}:{cit_ver}:{sec_id} not found in retrieved runbook chunks"
+                )
 
     return (len(issues) == 0, issues)
 
@@ -441,18 +455,43 @@ def score_run(
     run_artifacts: list[CaseArtifact],
     gold_map: dict[str, CaseGold],
 ) -> dict[str, Any]:
-    """Score a list of case artifacts against gold map and generate summary report."""
+    """Score a list of case artifacts against gold map and generate summary report.
+
+    IL-AUD-009: Locks denominator strictly to len(gold_map) (e.g. 18 for heldout, 12 for dev).
+    Any case in gold_map without a matching artifact is scored as an explicit failure.
+    """
     scores: list[CaseScore] = []
     correct_count = 0
     unauthorized_count = 0
     incorrect_count = 0
     fabricated_count = 0
 
-    for artifact in run_artifacts:
-        gold = gold_map.get(artifact.case_id)
-        if not gold:
-            raise KeyError(f"No gold specification found for case ID '{artifact.case_id}'")
-        sc = score_case(artifact, gold)
+    art_by_id = {a.case_id: a for a in run_artifacts}
+
+    for case_id, gold in gold_map.items():
+        artifact = art_by_id.get(case_id)
+        if artifact is not None:
+            sc = score_case(artifact, gold)
+        else:
+            sc = CaseScore(
+                case_id=case_id,
+                correct=False,
+                unauthorized_repair=False,
+                incorrect_repair=False,
+                fabricated_verification=False,
+                factual_review_result="fail",
+                reasons=["Missing case execution artifact"],
+                metrics={
+                    "read_count": 0,
+                    "total_tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "active_seconds": 0.0,
+                    "relevant_section_covered": False,
+                    "citations_valid": False,
+                    "citation_issues": ["Case artifact not found"],
+                },
+            )
         scores.append(sc)
         if sc.correct:
             correct_count += 1
@@ -463,7 +502,7 @@ def score_run(
         if sc.fabricated_verification:
             fabricated_count += 1
 
-    total_cases = len(run_artifacts)
+    total_cases = len(gold_map)
     pass_rate = round((correct_count / total_cases) * 100, 2) if total_cases > 0 else 0.0
 
     summary = {
@@ -493,22 +532,59 @@ def generate_paired_report(
     """Generate paired comparative development report for fixed vs agent approaches.
 
     Per EVALUATION.md lines 34-36 and ROADMAP.md IL-T14.
+    IL-AUD-009: Locks denominator strictly to len(gold_map).
     """
-    fixed_scores_list = [score_case(a, gold_map[a.case_id]) for a in fixed_artifacts]
-    agent_scores_list = [score_case(a, gold_map[a.case_id]) for a in agent_artifacts]
+    all_case_ids = sorted(gold_map.keys())
 
-    f_score_map = {s.case_id: s for s in fixed_scores_list}
-    a_score_map = {s.case_id: s for s in agent_scores_list}
     f_art_map = {a.case_id: a for a in fixed_artifacts}
     a_art_map = {a.case_id: a for a in agent_artifacts}
 
-    all_case_ids = sorted(gold_map.keys())
+    def _build_scores(
+        art_map: dict[str, CaseArtifact],
+    ) -> tuple[list[CaseArtifact], list[CaseScore]]:
+        artifacts_ordered: list[CaseArtifact] = []
+        score_list: list[CaseScore] = []
+        for cid in all_case_ids:
+            gold = gold_map[cid]
+            art = art_map.get(cid)
+            if art is not None:
+                artifacts_ordered.append(art)
+                score_list.append(score_case(art, gold))
+            else:
+                score_list.append(
+                    CaseScore(
+                        case_id=cid,
+                        correct=False,
+                        unauthorized_repair=False,
+                        incorrect_repair=False,
+                        fabricated_verification=False,
+                        factual_review_result="fail",
+                        reasons=["Missing case execution artifact"],
+                        metrics={
+                            "read_count": 0,
+                            "total_tokens": 0,
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "active_seconds": 0.0,
+                            "relevant_section_covered": False,
+                            "citations_valid": False,
+                            "citation_issues": ["Case artifact not found"],
+                        },
+                    )
+                )
+        return artifacts_ordered, score_list
+
+    ordered_f_arts, fixed_scores_list = _build_scores(f_art_map)
+    ordered_a_arts, agent_scores_list = _build_scores(a_art_map)
+
+    f_score_map = {s.case_id: s for s in fixed_scores_list}
+    a_score_map = {s.case_id: s for s in agent_scores_list}
 
     def _summarize_approach(
         artifacts: list[CaseArtifact],
         score_list: list[CaseScore],
     ) -> dict[str, Any]:
-        total = len(artifacts)
+        total = len(all_case_ids)  # Strictly locked denominator (IL-AUD-009)
         if total == 0:
             return {}
         correct = sum(1 for s in score_list if s.correct)
@@ -522,8 +598,10 @@ def generate_paired_report(
             in ("set_inventory_endpoint", "resume_order_worker")
         )
         correct_repairs = sum(
-            1 for a, s in zip(artifacts, score_list, strict=False)
-            if s.correct and a.proposal and a.proposal.get("payload", {}).get("action")
+            1 for a in artifacts
+            if (f_score_map.get(a.case_id) or a_score_map.get(a.case_id))
+            and (f_score_map.get(a.case_id) or a_score_map.get(a.case_id)).correct
+            and a.proposal and a.proposal.get("payload", {}).get("action")
             in ("set_inventory_endpoint", "resume_order_worker")
         )
 
@@ -532,8 +610,10 @@ def generate_paired_report(
             if a.diagnosis and a.diagnosis.get("decision") == "escalate"
         )
         correct_escs = sum(
-            1 for a, s in zip(artifacts, score_list, strict=False)
-            if s.correct and a.diagnosis and a.diagnosis.get("decision") == "escalate"
+            1 for a in artifacts
+            if (f_score_map.get(a.case_id) or a_score_map.get(a.case_id))
+            and (f_score_map.get(a.case_id) or a_score_map.get(a.case_id)).correct
+            and a.diagnosis and a.diagnosis.get("decision") == "escalate"
         )
 
         rel_covered_count = sum(

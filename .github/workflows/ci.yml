@@ -65,13 +65,16 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Install Python Dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Ruff Lint & Format Check
+        run: uv run ruff check .
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Ruff Lint & Format Check
-        run: uv run ruff check .
 
       - name: Frontend Dependencies & TypeScript Typecheck
         run: |
@@ -80,9 +83,6 @@ jobs:
 
       - name: Frontend Production Build
         run: npm --prefix frontend run build
-
-      - name: Install Python Dependencies
-        run: uv sync --locked --extra dev
 
       - name: Run Database Migrations
         run: |

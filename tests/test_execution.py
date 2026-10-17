@@ -195,6 +195,43 @@ async def test_green_health_is_not_recovery(live_settings):
 
 
 @pytest.mark.asyncio
+async def test_verify_checkout_refuses_recovery_without_applied_receipt(live_settings):
+    """PRD IL-08/IL-09 & IL-AUD-003: Fresh checkout success alone cannot declare recovery
+    without bound applied receipt.
+    """
+    # Ensure sandbox is healthy so checkout succeeds
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+        sandbox_service.reset_sandbox(s_conn)
+
+    incident_id = uuid4()
+    with get_control_connection(live_settings) as c_conn:
+        with c_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO control.incidents (id, state, symptom, request_id)
+                VALUES (%s, 'verifying', 'Testing verification receipt bound check', %s)
+                """,
+                (incident_id, uuid4()),
+            )
+        c_conn.commit()
+
+    # Call verify_checkout: checkout will pass, but no execution receipt exists!
+    result = await verify_checkout(incident_id, uuid4(), settings=live_settings)
+    assert result.verdict == "pass"
+
+    # Incident state MUST NOT be verified_recovered; it must be failed
+    with get_control_connection(live_settings) as c_conn:
+        with c_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state, outcome FROM control.incidents WHERE id = %s",
+                (incident_id,),
+            )
+            row = cur.fetchone()
+            assert row[0] == "failed"
+            assert row[1]["reason"] == "unbound_recovery_refused"
+
+
+@pytest.mark.asyncio
 async def test_execute_claim_applies_repair_and_increments_revision(live_settings):
     """Executing an approved claim mutates sandbox, updates state, and writes receipt."""
     with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
@@ -301,11 +338,11 @@ async def test_execute_claim_stale_target_revision_precondition_failed(live_sett
         assert state_after["revision"] == actual_rev
         assert state_after["endpoint_key"] != "inventory-local"
 
-    # Control incident must be failed
+    # Control incident must be stale (IL-AUD-006)
     with get_control_connection(live_settings) as c_conn:
         with c_conn.cursor() as cur:
             cur.execute("SELECT state FROM control.incidents WHERE id = %s", (incident_id,))
-            assert cur.fetchone()[0] == "failed"
+            assert cur.fetchone()[0] == "stale"
 
 
 @pytest.mark.asyncio

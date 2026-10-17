@@ -180,9 +180,28 @@ class StartIncident(BaseSchema):
     order_id: UUID | None = None
 
 
+IncidentState = Literal[
+    "investigating",
+    "awaiting_approval",
+    "approved",
+    "executing",
+    "verifying",
+    "verified_recovered",
+    "verification_failed",
+    "escalated",
+    "failed",
+    "rejected",
+    "expired",
+    "cancelled",
+    "execution_unknown",
+    "closed_unknown",
+    "stale",
+]
+
+
 class IncidentView(BaseSchema):
     id: UUID
-    state: str
+    state: IncidentState
     symptom: str
     request_id: UUID
     order_id: UUID | None = None

@@ -17,7 +17,8 @@ export type IncidentState =
   | "expired"
   | "cancelled"
   | "execution_unknown"
-  | "closed_unknown";
+  | "closed_unknown"
+  | "stale";
 
 export type RepairAction = "set_inventory_endpoint" | "resume_order_worker";
 
@@ -92,10 +93,11 @@ export interface ApprovalDecision {
 
 export interface ApprovalView {
   proposal_id: string;
-  incident_id: string;
   decision: "approve" | "reject";
+  owner_id: string;
+  reviewed_digest: string;
+  reviewed_revision: number;
   decided_at: string;
-  reviewer: string;
 }
 
 export interface RepairReceipt {
@@ -125,11 +127,10 @@ export interface ExecutionView {
 export interface EventItem {
   seq: number;
   event_type: string;
-  created_at: string;
+  timestamp: string;
   payload: Record<string, unknown>;
-  duration_ms: number | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
+  duration_ms?: number | null;
+  token_count?: number | null;
 }
 
 export interface EventPage {

@@ -2,7 +2,7 @@
 
 A bounded application-recovery agent: investigate a broken sandbox checkout, propose a specific repair, wait for human approval, and verify the result through actual application behavior.
 
-**Status: Active implementation in progress. Phases P0 through P5 fully complete and audited; Phase P6 (frozen held-out evaluation, requirement evidence mapping, and interview readiness) complete with live verification.**
+**Status: Active implementation in progress. Phases P0 through P5 fully complete and audited; Phase P6 open (held-out quality gate 10/18 < 15/18; audit remediation underway).**
 
 Private repository: [kaustubh-dot/incidentlab](https://github.com/kaustubh-dot/incidentlab).
 

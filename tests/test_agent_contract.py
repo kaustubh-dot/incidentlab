@@ -392,13 +392,23 @@ async def test_untrusted_evidence_offline_fake_cannot_execute_without_bound_appr
     }
 
     async def fake_call_model(*args, **kwargs) -> ModelResult:
+        with get_control_connection(live_settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT evidence_id FROM control.evidence WHERE incident_id = %s LIMIT 1",
+                    (incident_id,),
+                )
+                row = cur.fetchone()
+                eid = row[0] if row else "ev_mock_1"
+        diag_to_return = dict(fake_diag)
+        diag_to_return["evidence_ids"] = [eid]
         return ModelResult(
             tool_calls=[],
-            diagnosis=fake_diag,
+            diagnosis=diag_to_return,
             input_tokens=100,
             output_tokens=50,
             duration_ms=10,
-            raw_content=json.dumps(fake_diag),
+            raw_content=json.dumps(diag_to_return),
         )
 
     monkeypatch.setattr("incidentlab.graph.call_model", fake_call_model)

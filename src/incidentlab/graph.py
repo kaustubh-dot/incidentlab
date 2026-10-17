@@ -228,6 +228,14 @@ def _check_cancellation(settings: Settings, incident_id: UUID) -> bool:
             return bool(row[0]) if row else False
 
 
+def _get_remaining_active_deadline_seconds(
+    settings: Settings, active_ms: int, t0: float
+) -> float:
+    """Calculate remaining active deadline seconds from monotonic timer and prior active_ms."""
+    elapsed_seconds = (time.monotonic() - t0) + (active_ms / 1000.0)
+    return float(settings.il_active_deadline_seconds) - elapsed_seconds
+
+
 async def run_investigation(
     incident_id: UUID,
     settings: Settings | None = None,
@@ -323,6 +331,11 @@ async def run_investigation(
     if _check_cancellation(settings, incident_id):
         return await _terminate_cancelled(settings, incident_id, state, t0)
 
+    if _get_remaining_active_deadline_seconds(settings, active_ms, t0) <= 0.0:
+        return await _terminate_failed(
+            settings, incident_id, state, "Active deadline exceeded before initial observations"
+        )
+
     log_texts = ""
     async with McpSession(settings) as mcp:
         if "get_health" not in masked_tools:
@@ -354,9 +367,37 @@ async def run_investigation(
     if _check_cancellation(settings, incident_id):
         return await _terminate_cancelled(settings, incident_id, state, t0)
 
+    if _get_remaining_active_deadline_seconds(settings, active_ms, t0) <= 0.0:
+        return await _terminate_failed(
+            settings, incident_id, state, "Active deadline exceeded before runbook retrieval"
+        )
+
     query = f"{symptom} {log_texts}".strip()
     with get_control_connection(settings) as conn:
         runbook_evs = retrieve_runbooks(conn, query=query, limit=3)
+        # IL-AUD-007: Persist retrieved runbook chunks into control.evidence
+        with conn.cursor() as cur:
+            for rbe in runbook_evs:
+                cur.execute(
+                    """
+                    INSERT INTO control.evidence (
+                        incident_id, evidence_id, kind, source,
+                        source_version, section_id, observed_at, data
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (incident_id, evidence_id) DO NOTHING
+                    """,
+                    (
+                        incident_id,
+                        rbe.evidence_id,
+                        rbe.kind,
+                        rbe.source,
+                        rbe.source_version,
+                        rbe.section_id,
+                        rbe.observed_at,
+                        Jsonb(rbe.data),
+                    ),
+                )
+        conn.commit()
 
     rb_data = []
     for rbe in runbook_evs:
@@ -383,6 +424,13 @@ async def run_investigation(
         if _check_cancellation(settings, incident_id):
             return await _terminate_cancelled(settings, incident_id, state, t0)
 
+        remaining_s = _get_remaining_active_deadline_seconds(settings, active_ms, t0)
+        if remaining_s <= 0.0:
+            return await _terminate_failed(
+                settings, incident_id, state, "Active deadline exceeded during investigation loop"
+            )
+        call_timeout = min(float(settings.il_model_timeout_seconds), max(1.0, remaining_s))
+
         # On 4th turn (index 3) or if read calls exhausted, force structured final diagnosis schema
         is_final_turn = (state["model_turn_count"] >= 3) or (state["read_count"] >= 6)
         messages = build_context(
@@ -400,6 +448,7 @@ async def run_investigation(
                     tools=[],
                     final_schema=DIAGNOSIS_SCHEMA,
                     settings=settings,
+                    timeout_seconds=call_timeout,
                 )
             except Exception as exc:
                 logger.error("Final turn model call failed: %s", exc)
@@ -440,6 +489,7 @@ async def run_investigation(
                     tools=active_tools,
                     final_schema=None,
                     settings=settings,
+                    timeout_seconds=call_timeout,
                 )
             except Exception as exc:
                 logger.error("Investigation turn model call failed: %s", exc)
@@ -472,6 +522,13 @@ async def run_investigation(
                     for tc in model_res.tool_calls:
                         if state["read_count"] >= 6:
                             break
+                        if _get_remaining_active_deadline_seconds(settings, active_ms, t0) <= 0.0:
+                            return await _terminate_failed(
+                                settings,
+                                incident_id,
+                                state,
+                                "Active deadline exceeded during tool execution",
+                            )
                         if tc.name in masked_tools:
                             logger.warning("Tool %s is masked by evidence filter", tc.name)
                             state["recent_results"].append({
@@ -504,6 +561,12 @@ async def run_investigation(
 
     # If diagnosis was not set, request schema mode now
     if not state.get("diagnosis"):
+        remaining_s = _get_remaining_active_deadline_seconds(settings, active_ms, t0)
+        if remaining_s <= 0.0:
+            return await _terminate_failed(
+                settings, incident_id, state, "Active deadline exceeded before final diagnosis"
+            )
+        call_timeout = min(float(settings.il_model_timeout_seconds), max(1.0, remaining_s))
         messages = build_context(
             state,
             token_budget=settings.il_max_input_tokens,
@@ -522,6 +585,7 @@ async def run_investigation(
                 tools=[],
                 final_schema=DIAGNOSIS_SCHEMA,
                 settings=settings,
+                timeout_seconds=call_timeout,
             )
             state["diagnosis"] = model_res.diagnosis
         except Exception as exc:
@@ -552,6 +616,74 @@ async def run_investigation(
     except Exception as exc:
         return await _terminate_failed(
             settings, incident_id, state, f"Diagnosis schema validation failed: {exc}"
+        )
+
+    # IL-AUD-007: Validate diag.evidence_ids against control.evidence for this incident
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT evidence_id FROM control.evidence WHERE incident_id = %s",
+                (incident_id,),
+            )
+            persisted_evidence_ids = {row[0] for row in cur.fetchall()}
+
+    # Also include in-memory collected evidence IDs (e.g. for offline tests/mocks)
+    known_valid_evidence_ids = persisted_evidence_ids.union(set(state.get("evidence_ids", [])))
+
+    invalid_evidence_ids = [
+        eid for eid in diag.evidence_ids if eid not in known_valid_evidence_ids
+    ]
+    if invalid_evidence_ids:
+        logger.warning(
+            "Diagnosis cites unpersisted/unobserved evidence IDs: %s", invalid_evidence_ids
+        )
+        return await _terminate_failed(
+            settings,
+            incident_id,
+            state,
+            f"Diagnosis cites unpersisted evidence IDs: {invalid_evidence_ids}",
+        )
+
+    # IL-AUD-007: Validate citations against retrieved runbook chunks before proposal creation
+    retrieved_sections = set()
+    for rb in state.get("retrieved_runbooks", []):
+        src = (rb.get("source") or "").lower().strip()
+        ver = str(rb.get("source_version") or "").lower().strip()
+        sec = (rb.get("section_id") or "").lower().strip()
+        cid = (rb.get("chunk_id") or "").lower().strip()
+        retrieved_sections.add((src, ver, sec))
+        retrieved_sections.add(cid)
+
+    unretrieved_citations = []
+    for cit in diag.runbook_citations:
+        c_src = cit.runbook_id.lower().strip()
+        c_ver = cit.source_version.lower().strip()
+        c_sec = cit.section_id.lower().strip()
+        matched = False
+        for item in retrieved_sections:
+            if isinstance(item, tuple):
+                r_src, r_ver, r_sec = item
+                if (c_src == r_src or c_src in r_src) and (c_ver == r_ver) and (
+                    c_sec == r_sec or c_sec in r_sec or r_sec in c_sec
+                ):
+                    matched = True
+                    break
+            elif isinstance(item, str):
+                if c_src in item and c_sec in item:
+                    matched = True
+                    break
+        if not matched:
+            unretrieved_citations.append(f"{cit.runbook_id}:{cit.source_version}:{cit.section_id}")
+
+    if unretrieved_citations:
+        logger.warning(
+            "Diagnosis cites unretrieved runbook sections: %s", unretrieved_citations
+        )
+        return await _terminate_failed(
+            settings,
+            incident_id,
+            state,
+            f"Runbook citations not found in retrieved chunks: {unretrieved_citations}",
         )
 
     if diag.decision == "propose_repair" and diag.repair is not None:
