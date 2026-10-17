@@ -91,7 +91,7 @@ jobs:
 
       - name: Start Sandbox Service in Background
         run: |
-          uv run uvicorn incidentlab.sandbox.api:app --host 127.0.0.1 --port 8001 &
+          .venv/bin/uvicorn incidentlab.sandbox.api:app --host 127.0.0.1 --port 8001 &
           for i in {1..30}; do
             if curl -s http://127.0.0.1:8001/healthz | grep -q "ok"; then
               echo "Sandbox service is ready."
@@ -103,3 +103,7 @@ jobs:
 
       - name: Run Essential Offline Test Suite
         run: uv run pytest -m 'not live_model'
+
+      - name: Stop Sandbox Service
+        if: always()
+        run: pkill -f uvicorn || true
