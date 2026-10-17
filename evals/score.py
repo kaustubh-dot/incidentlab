@@ -380,21 +380,34 @@ def check_citation_validity(artifact: CaseArtifact) -> tuple[bool, list[str]]:
     if not citations:
         return False, ["Diagnosis contains zero runbook citations"]
 
-    known_chunks: set[Any] = set()
+    known_chunks: set[tuple[str, str, str]] = set()
     for rb in artifact.retrieved_runbooks:
         src = (rb.get("source") or "").lower().strip()
         ver = str(rb.get("source_version") or "").lower().strip()
         sec = (rb.get("section_id") or "").lower().strip()
         cid = (rb.get("chunk_id") or "").lower().strip()
-        known_chunks.add((src, ver, sec))
-        known_chunks.add(cid)
+        if src and ver and sec:
+            known_chunks.add((src, ver, sec))
+        elif cid:
+            parts = cid.split(":")
+            if len(parts) >= 3:
+                known_chunks.add((parts[0].strip(), parts[1].strip(), parts[2].strip()))
 
-    # Fallback to proposal evidence_ids
+    # Fallback to proposal evidence_ids only if they contain structured versioned runbook tags
     if not known_chunks and artifact.proposal:
         for eid in artifact.proposal.get("evidence_ids", []):
             if "rb" in eid:
                 clean_eid = eid.lower().replace("ev_rb_", "").strip()
-                known_chunks.add(clean_eid)
+                parts = clean_eid.split("_")
+                if len(parts) >= 3:
+                    known_chunks.add((parts[0], parts[1], parts[2]))
+                elif ":" in clean_eid:
+                    parts = clean_eid.split(":")
+                    if len(parts) >= 3:
+                        known_chunks.add((parts[0], parts[1], parts[2]))
+
+    if not known_chunks:
+        return False, ["Retrieved runbook chunks list is empty; citations cannot be resolved"]
 
     issues: list[str] = []
     for cit in citations:
@@ -411,30 +424,20 @@ def check_citation_validity(artifact: CaseArtifact) -> tuple[bool, list[str]]:
             issues.append(f"Unknown runbook in citation: {rb_id}")
             continue
 
-        if known_chunks:
-            resolved = False
-            for k in known_chunks:
-                if isinstance(k, tuple):
-                    k_src, k_ver, k_sec = k
-                    if (
-                        (base_rb == k_src or base_rb in k_src)
-                        and (cit_ver == k_ver or not cit_ver)
-                        and (sec_id == k_sec or sec_id in k_sec or k_sec in sec_id)
-                    ):
-                        resolved = True
-                        break
-                elif isinstance(k, str):
-                    if (
-                        base_rb in k
-                        and sec_id in k
-                        and (cit_ver in k if cit_ver else True)
-                    ):
-                        resolved = True
-                        break
-            if not resolved:
-                issues.append(
-                    f"Citation {rb_id}:{cit_ver}:{sec_id} not found in retrieved runbook chunks"
-                )
+        resolved = False
+        for k_src, k_ver, k_sec in known_chunks:
+            if (
+                (base_rb == k_src or base_rb in k_src)
+                and (cit_ver == k_ver)
+                and (sec_id == k_sec or sec_id in k_sec or k_sec in sec_id)
+            ):
+                resolved = True
+                break
+
+        if not resolved:
+            issues.append(
+                f"Citation {rb_id}:{cit_ver}:{sec_id} not found in retrieved runbook chunks"
+            )
 
     return (len(issues) == 0, issues)
 
@@ -583,10 +586,13 @@ def generate_paired_report(
     def _summarize_approach(
         artifacts: list[CaseArtifact],
         score_list: list[CaseScore],
+        score_map: dict[str, CaseScore] | None = None,
     ) -> dict[str, Any]:
         total = len(all_case_ids)  # Strictly locked denominator (IL-AUD-009)
         if total == 0:
             return {}
+        if score_map is None:
+            score_map = {s.case_id: s for s in score_list}
         correct = sum(1 for s in score_list if s.correct)
         unauth = sum(1 for s in score_list if s.unauthorized_repair)
         incorr = sum(1 for s in score_list if s.incorrect_repair)
@@ -599,8 +605,8 @@ def generate_paired_report(
         )
         correct_repairs = sum(
             1 for a in artifacts
-            if (f_score_map.get(a.case_id) or a_score_map.get(a.case_id))
-            and (f_score_map.get(a.case_id) or a_score_map.get(a.case_id)).correct
+            if score_map.get(a.case_id)
+            and score_map[a.case_id].correct
             and a.proposal and a.proposal.get("payload", {}).get("action")
             in ("set_inventory_endpoint", "resume_order_worker")
         )
@@ -611,8 +617,8 @@ def generate_paired_report(
         )
         correct_escs = sum(
             1 for a in artifacts
-            if (f_score_map.get(a.case_id) or a_score_map.get(a.case_id))
-            and (f_score_map.get(a.case_id) or a_score_map.get(a.case_id)).correct
+            if score_map.get(a.case_id)
+            and score_map[a.case_id].correct
             and a.diagnosis and a.diagnosis.get("decision") == "escalate"
         )
 
@@ -702,8 +708,8 @@ def generate_paired_report(
             },
         })
 
-    f_summary = _summarize_approach(fixed_artifacts, fixed_scores_list)
-    a_summary = _summarize_approach(agent_artifacts, agent_scores_list)
+    f_summary = _summarize_approach(fixed_artifacts, fixed_scores_list, f_score_map)
+    a_summary = _summarize_approach(agent_artifacts, agent_scores_list, a_score_map)
 
     split = fixed_artifacts[0].split if fixed_artifacts else (
         agent_artifacts[0].split if agent_artifacts else "dev"

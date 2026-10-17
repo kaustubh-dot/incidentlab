@@ -485,3 +485,60 @@ async def test_upstream_maintenance_fault_injection(sandbox_client, live_setting
             assert "upstream_maintenance" not in str(config_data)
     finally:
         await sandbox_client.reset()
+
+
+@pytest.mark.integration
+async def test_diagnostics_logs_request_prioritization_prevents_starvation(
+    sandbox_client, live_settings
+):
+    """Verify get_diagnostics_logs prioritizes target request_id even with >40 noise logs."""
+    from incidentlab.sandbox.service import get_diagnostics_logs, record_log
+
+    await sandbox_client.reset()
+    target_req_id = uuid4()
+
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as conn:
+        # Insert 50 background noise entries first
+        for i in range(50):
+            record_log(
+                conn,
+                event_kind="background_noise",
+                message=f"Background noise telemetry ping #{i + 1}",
+                severity="INFO",
+                data={"ping_idx": i},
+            )
+        # Then insert the target request failure entry with a higher seq
+        record_log(
+            conn,
+            event_kind="inventory_failed",
+            message="Target request inventory check failed with HTTP 503",
+            request_id=target_req_id,
+            severity="ERROR",
+            data={"status": 503},
+        )
+        conn.commit()
+
+        # Query diagnostics logs for target request_id with limit 40
+        logs = get_diagnostics_logs(conn, request_id=target_req_id, limit=40)
+        assert len(logs) == 40
+
+        # The target request row must NOT be starved out
+        matching_req_logs = [entry for entry in logs if entry.request_id == target_req_id]
+        assert len(matching_req_logs) == 1
+        assert matching_req_logs[0].event_kind == "inventory_failed"
+
+        # The returned entries must be strictly ordered chronologically by seq ASC
+        seqs = [entry.seq for entry in logs]
+        assert seqs == sorted(seqs)
+
+    # Also verify via HTTP diagnostics endpoint
+    read_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_read_token}"}
+    async with httpx.AsyncClient(timeout=5.0) as ac:
+        resp = await ac.get(
+            f"{live_settings.il_sandbox_base_url}/diagnostics/logs?request_id={target_req_id}",
+            headers=read_headers,
+        )
+        assert resp.status_code == 200
+        http_logs = resp.json()
+        assert len(http_logs) == 40
+        assert any(entry.get("request_id") == str(target_req_id) for entry in http_logs)

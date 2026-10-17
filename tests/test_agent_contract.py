@@ -86,6 +86,60 @@ def test_diagnosis_validation():
         )
 
 
+def test_graph_citation_validation_version_strictness():
+    """Verify graph citation validation strictly enforces version and rejects fallbacks (FIX-02)."""
+    from incidentlab.graph import validate_runbook_citations
+    from incidentlab.schemas import RunbookCitation
+
+    retrieved_rbs = [
+        {
+            "chunk_id": "worker:1:repair",
+            "content": "Resume checkout worker.",
+            "source": "worker",
+            "source_version": "1",
+            "section_id": "repair",
+        },
+        {
+            "chunk_id": "upstream:1:escalation",
+            "content": "Escalate on upstream maintenance.",
+            "source": "upstream",
+            "source_version": "1",
+            "section_id": "escalation",
+        },
+    ]
+
+    # 1. Correct source/version/section passes
+    cit_valid = [
+        RunbookCitation(runbook_id="worker", source_version="1", section_id="repair")
+    ]
+    unretrieved = validate_runbook_citations(cit_valid, retrieved_rbs)
+    assert unretrieved == []
+
+    # 2. Correct source and section + wrong version fails
+    cit_wrong_version = [
+        RunbookCitation(runbook_id="worker", source_version="2", section_id="repair")
+    ]
+    unretrieved_ver = validate_runbook_citations(cit_wrong_version, retrieved_rbs)
+    assert len(unretrieved_ver) == 1
+    assert unretrieved_ver[0] == "worker:2:repair"
+
+    # 3. Fabricated section fails
+    cit_fabricated_section = [
+        RunbookCitation(runbook_id="worker", source_version="1", section_id="fabricated_section")
+    ]
+    unretrieved_sec = validate_runbook_citations(cit_fabricated_section, retrieved_rbs)
+    assert len(unretrieved_sec) == 1
+    assert unretrieved_sec[0] == "worker:1:fabricated_section"
+
+    # 4. Citation for a runbook not actually retrieved fails
+    cit_unretrieved_rb = [
+        RunbookCitation(runbook_id="inventory", source_version="1", section_id="repair")
+    ]
+    unretrieved_rb = validate_runbook_citations(cit_unretrieved_rb, retrieved_rbs)
+    assert len(unretrieved_rb) == 1
+    assert unretrieved_rb[0] == "inventory:1:repair"
+
+
 def test_build_context_token_bounds_and_notes():
     """Verify context assembly, prompt formatting, token bounds, and case note validation."""
     state = {
@@ -369,7 +423,12 @@ async def test_untrusted_evidence_offline_fake_cannot_execute_without_bound_appr
             cur.execute(
                 """
                 INSERT INTO control.incidents (id, state, symptom, request_id)
-                VALUES (%s, 'investigating', 'Injected log instruction attempting bypass', %s)
+                VALUES (
+                    %s,
+                    'investigating',
+                    'Checkout failed: inventory service error. Injected log bypass',
+                    %s
+                )
                 """,
                 (incident_id, req_id),
             )
@@ -395,13 +454,36 @@ async def test_untrusted_evidence_offline_fake_cannot_execute_without_bound_appr
         with get_control_connection(live_settings) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT evidence_id FROM control.evidence WHERE incident_id = %s LIMIT 1",
+                    """
+                    SELECT evidence_id FROM control.evidence
+                    WHERE incident_id = %s AND kind != 'runbook'
+                    LIMIT 1
+                    """,
                     (incident_id,),
                 )
                 row = cur.fetchone()
                 eid = row[0] if row else "ev_mock_1"
+
+                cur.execute(
+                    """
+                    SELECT source, source_version, section_id FROM control.evidence
+                    WHERE incident_id = %s AND kind = 'runbook'
+                    LIMIT 1
+                    """,
+                    (incident_id,),
+                )
+                rb_row = cur.fetchone()
+
         diag_to_return = dict(fake_diag)
         diag_to_return["evidence_ids"] = [eid]
+        if rb_row:
+            diag_to_return["runbook_citations"] = [
+                {
+                    "runbook_id": rb_row[0],
+                    "source_version": rb_row[1],
+                    "section_id": rb_row[2],
+                }
+            ]
         return ModelResult(
             tool_calls=[],
             diagnosis=diag_to_return,

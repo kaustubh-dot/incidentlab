@@ -33,6 +33,7 @@ def record_log(
     order_id: UUID | None = None,
     severity: str = "INFO",
     data: dict[str, Any] | None = None,
+    timestamp: datetime | None = None,
 ) -> int:
     """Record a structured log entry into sandbox.logs with bounded message length."""
     truncated = False
@@ -50,10 +51,11 @@ def record_log(
             INSERT INTO sandbox.logs (
                 timestamp, request_id, order_id, event_kind, severity, message, data
             )
-            VALUES (NOW(), %s, %s, %s, %s, %s, %s)
+            VALUES (COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s)
             RETURNING seq
             """,
             (
+                timestamp,
                 request_id,
                 order_id,
                 event_kind,
@@ -279,27 +281,57 @@ def get_diagnostics_logs(
     request_id: UUID | None = None,
     limit: int = 40,
 ) -> list[LogEntry]:
-    """Retrieve ordered recent structured logs up to limit."""
+    """Retrieve ordered recent structured logs up to limit, prioritizing matching request_id."""
     limit = max(1, min(limit, 40))
     with conn.cursor() as cur:
         if request_id is not None:
             cur.execute(
                 """
+                WITH req_logs AS (
+                    SELECT seq, timestamp, request_id, order_id, event_kind,
+                           severity, message, data, 1 AS priority
+                    FROM sandbox.logs
+                    WHERE request_id = %s
+                    ORDER BY seq DESC
+                    LIMIT %s
+                ),
+                noise_logs AS (
+                    SELECT seq, timestamp, request_id, order_id, event_kind,
+                           severity, message, data, 2 AS priority
+                    FROM sandbox.logs
+                    WHERE (request_id IS NULL OR event_kind = 'background_noise')
+                      AND (request_id IS DISTINCT FROM %s)
+                    ORDER BY seq DESC
+                    LIMIT %s
+                ),
+                combined AS (
+                    SELECT * FROM req_logs
+                    UNION ALL
+                    SELECT * FROM noise_logs
+                ),
+                ranked AS (
+                    SELECT seq, timestamp, request_id, order_id, event_kind, severity, message, data
+                    FROM combined
+                    ORDER BY priority ASC, seq DESC
+                    LIMIT %s
+                )
                 SELECT seq, timestamp, request_id, order_id, event_kind, severity, message, data
-                FROM sandbox.logs
-                WHERE request_id = %s OR request_id IS NULL OR event_kind = 'background_noise'
+                FROM ranked
                 ORDER BY seq ASC
-                LIMIT %s
                 """,
-                (request_id, limit),
+                (request_id, limit, request_id, limit, limit),
             )
         else:
             cur.execute(
                 """
                 SELECT seq, timestamp, request_id, order_id, event_kind, severity, message, data
-                FROM sandbox.logs
+                FROM (
+                    SELECT seq, timestamp, request_id, order_id, event_kind, severity, message, data
+                    FROM sandbox.logs
+                    ORDER BY seq DESC
+                    LIMIT %s
+                ) sub
                 ORDER BY seq ASC
-                LIMIT %s
                 """,
                 (limit,),
             )

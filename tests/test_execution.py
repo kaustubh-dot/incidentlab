@@ -596,3 +596,74 @@ async def test_action_allowlist_enforced(live_settings):
 
     with pytest.raises(ValueError, match="Action 'restart_system' is not supported"):
         await execute_claim(claim, settings=live_settings)
+
+
+@pytest.mark.asyncio
+async def test_smoke_demo_fails_closed_without_mutating_sandbox(live_settings):
+    """Verify smoke-demo fails closed without mutating sandbox when active incident exists."""
+    from incidentlab.cli import run_smoke_demo
+    from incidentlab.db import get_control_connection, get_sandbox_connection
+
+    # 1. Capture sandbox target state and order count before
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+        with s_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT revision, endpoint_key, worker_running, maintenance
+                FROM sandbox.target_state WHERE id = 1
+                """
+            )
+            target_before = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM sandbox.orders")
+            orders_count_before = cur.fetchone()[0]
+
+    # 2. Seed an active nonterminal incident in control DB
+    active_inc_id = uuid4()
+    with get_control_connection(live_settings) as c_conn:
+        with c_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO control.incidents (id, state, symptom, request_id)
+                VALUES (%s, 'investigating', 'Active incident in flight', %s)
+                """,
+                (active_inc_id, uuid4()),
+            )
+        c_conn.commit()
+
+    try:
+        # 3. Run smoke demo
+        rc = await run_smoke_demo(
+            family="worker_paused", approval="approve", settings=live_settings
+        )
+        assert rc == 1
+
+        # 4. Prove ZERO sandbox mutations: target state and orders are completely identical
+        with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+            with s_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT revision, endpoint_key, worker_running, maintenance
+                    FROM sandbox.target_state WHERE id = 1
+                    """
+                )
+                target_after = cur.fetchone()
+                cur.execute("SELECT COUNT(*) FROM sandbox.orders")
+                orders_count_after = cur.fetchone()[0]
+
+        assert target_after == target_before, (
+            f"Sandbox target state was mutated! Before: {target_before}, After: {target_after}"
+        )
+        assert orders_count_after == orders_count_before, (
+            f"Sandbox orders count changed! Before: {orders_count_before}, "
+            f"After: {orders_count_after}"
+        )
+
+    finally:
+        # Clean up active incident
+        with get_control_connection(live_settings) as c_conn:
+            with c_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE control.incidents SET state = 'closed_unknown' WHERE id = %s",
+                    (active_inc_id,),
+                )
+            c_conn.commit()

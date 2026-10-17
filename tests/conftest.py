@@ -65,7 +65,7 @@ def clean_active_incidents(request):
                         SET state = 'closed_unknown'
                         WHERE state NOT IN (
                             'verified_recovered', 'verification_failed', 'escalated',
-                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
                         )
                         """
                     )
@@ -85,7 +85,7 @@ def clean_active_incidents(request):
                         SET state = 'closed_unknown'
                         WHERE state NOT IN (
                             'verified_recovered', 'verification_failed', 'escalated',
-                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
                         )
                         """
                     )

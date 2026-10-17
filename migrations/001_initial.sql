@@ -35,8 +35,7 @@ WHERE state NOT IN (
     'rejected',
     'expired',
     'cancelled',
-    'closed_unknown',
-    'stale'
+    'closed_unknown'
 );
 
 -- Evidence collection

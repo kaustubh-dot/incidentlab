@@ -571,6 +571,275 @@ async def resolve_unknown_cli(
     return 0
 
 
+async def run_smoke_demo(
+    family: str = "inventory_config",
+    approval: str = "approve",
+    settings: Settings | None = None,
+) -> int:
+    """Run full live smoke demonstration across three fault families.
+
+    Enforces fail-closed ordering (FIX-04):
+    1. Checks for any active nonterminal incident in control DB.
+    2. If one exists, returns 1 immediately with ZERO sandbox mutations (no reset, no inject).
+    3. Only if no active incident exists, proceeds to reset sandbox and inject fault.
+    """
+    from uuid import UUID, uuid4
+
+    import httpx
+
+    from incidentlab.approvals import claim_execution, decide_proposal
+    from incidentlab.db import get_control_connection
+    from incidentlab.executor import (
+        CheckoutError,
+        execute_claim,
+        submit_checkout,
+        wait_for_order_fulfillment,
+    )
+    from incidentlab.graph import run_investigation
+    from incidentlab.schemas import ApprovalDecision
+    from incidentlab.verifier import verify_checkout
+
+    if settings is None:
+        settings = Settings.from_env()
+    admin_headers = {"Authorization": f"Bearer {settings.il_sandbox_admin_token}"}
+
+    # 1. Check for active nonterminal incidents in control DB FIRST (IL-AUD-004 / FIX-04)
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, state
+                FROM control.incidents
+                WHERE state NOT IN (
+                    'verified_recovered', 'verification_failed', 'escalated',
+                    'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
+                )
+                LIMIT 1
+                """
+            )
+            active_inc = cur.fetchone()
+            if active_inc:
+                sys.stderr.write(
+                    f"Active non-terminal incident exists "
+                    f"({active_inc[0]}, state='{active_inc[1]}'). "
+                    "smoke-demo fails closed. Resolve or close active incident first.\n"
+                )
+                return 1
+
+    # 2. Reset target to clean state (ONLY executed if no active nonterminal incident exists)
+    sys.stderr.write("1. Resetting sandbox to healthy baseline...\n")
+    async with httpx.AsyncClient(timeout=10.0) as ac:
+        r = await ac.post(
+            f"{settings.il_sandbox_base_url}/operator/reset",
+            headers=admin_headers,
+        )
+        if r.status_code != 200:
+            sys.stderr.write(f"Reset failed: {r.text}\n")
+            return 1
+
+    # 3. Inject fault family
+    sys.stderr.write(f"2. Injecting fault family '{family}'...\n")
+    async with httpx.AsyncClient(timeout=10.0) as ac:
+        inj_resp = await ac.post(
+            f"{settings.il_sandbox_base_url}/operator/inject",
+            headers=admin_headers,
+            json={"family": family, "variant_seed": 1},
+        )
+        if inj_resp.status_code != 200:
+            sys.stderr.write(f"Inject failed: {inj_resp.text}\n")
+            return 1
+
+    # 4. Trigger failing checkout or worker stall to observe real failure
+    failing_req_id = uuid4()
+    failing_order_id = None
+    if family == "worker_paused":
+        sys.stderr.write("3. Probing checkout and worker fulfillment...\n")
+        accepted = await submit_checkout(uuid4(), settings=settings)
+        failing_req_id = accepted.request_id
+        failing_order_id = accepted.order_id
+        order_view = await wait_for_order_fulfillment(
+            accepted.order_id, settings=settings, timeout_seconds=1.5
+        )
+        if order_view.status == "fulfilled":
+            sys.stderr.write(
+                "ERROR: Worker was expected to be paused, but order was fulfilled!\n"
+            )
+            return 1
+        sys.stderr.write(
+            f"Observed worker stall: order {failing_order_id} "
+            f"remains in status '{order_view.status}'\n"
+        )
+        symptom_text = (
+            "Checkout accepted order but fulfillment timed out: order remains pending"
+        )
+    else:
+        sys.stderr.write("3. Probing checkout to observe genuine failure...\n")
+        try:
+            await submit_checkout(uuid4(), settings=settings)
+            sys.stderr.write("ERROR: Checkout unexpectedly succeeded!\n")
+            return 1
+        except CheckoutError as chk_err:
+            sys.stderr.write(
+                f"Observed checkout failure: {chk_err.code} - {chk_err.message}\n"
+            )
+            if chk_err.request_id:
+                try:
+                    failing_req_id = UUID(chk_err.request_id)
+                except Exception:
+                    pass
+            symptom_text = f"Checkout failed: {chk_err.message}"
+
+    # 5. Create incident in control database
+    incident_id = uuid4()
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO control.incidents (id, state, symptom, request_id, order_id)
+                VALUES (%s, 'investigating', %s, %s, %s)
+                """,
+                (incident_id, symptom_text, failing_req_id, failing_order_id),
+            )
+        conn.commit()
+
+    sys.stderr.write(
+        f"Created incident {incident_id} (failing_request_id={failing_req_id})\n"
+    )
+
+    # 6. Run autonomous investigation
+    sys.stderr.write(
+        "4. Starting autonomous investigation through read-only MCP tools...\n"
+    )
+    investigation_state = await run_investigation(incident_id, settings=settings)
+
+    # Check if investigation led to escalation (e.g. upstream maintenance)
+    if investigation_state.get("phase") == "escalated":
+        diag = investigation_state.get("diagnosis", {})
+        print("\n================== INCIDENT ESCALATED ==================")
+        print(f"Incident ID:      {incident_id}")
+        print("State:            escalated")
+        print(f"Summary:          {diag.get('summary')}")
+        print(f"Uncertainty:      {diag.get('uncertainty')}")
+        print("Repair:           None (External upstream condition - zero repair receipts)")
+        print("========================================================\n")
+        print(
+            f"SUCCESS: Incident {incident_id} escalated without repair action "
+            "(zero repair receipts)."
+        )
+        return 0
+
+    # 7. Read proposed action
+    with get_control_connection(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, payload, payload_digest, target_revision, expires_at
+                FROM control.proposals
+                WHERE incident_id = %s
+                """,
+                (incident_id,),
+            )
+            prop_row = cur.fetchone()
+            if not prop_row:
+                sys.stderr.write(
+                    "No proposal created during investigation.\n"
+                )
+                return 1
+
+    prop_id, payload, digest, target_rev, expires_at = prop_row
+    if not isinstance(payload, dict):
+        payload = json.loads(payload)
+
+    print("\n================== PROPOSED REPAIR ==================")
+    print(f"Incident ID:      {incident_id}")
+    print(f"Proposal ID:      {prop_id}")
+    print(f"Action:           {payload.get('action')}")
+    if "endpoint_key" in payload:
+        print(f"Endpoint Key:     {payload.get('endpoint_key')}")
+    if "worker_id" in payload:
+        print(f"Worker ID:        {payload.get('worker_id')}")
+    print(f"Target Revision:  {target_rev}")
+    print(f"Payload Digest:   {digest}")
+    print(f"Expires At:       {expires_at}")
+    print("=====================================================\n")
+
+    # 8. Approval decision
+    decision_val = approval
+    if decision_val == "interactive":
+        prompt_ans = (
+            input("Approve repair proposal? [y/N]: ").strip().lower()
+        )
+        decision_val = "approve" if prompt_ans in ("y", "yes") else "reject"
+
+    sys.stderr.write(f"5. Submitting decision: '{decision_val}'...\n")
+    decision_payload = ApprovalDecision(
+        proposal_id=prop_id,
+        payload_digest=digest,
+        target_revision=target_rev,
+        decision=decision_val,
+    )
+    approval_view = await decide_proposal(
+        incident_id=incident_id,
+        owner_id="owner",
+        decision=decision_payload,
+        settings=settings,
+    )
+    print(f"Approval recorded: {approval_view.decision}")
+
+    if decision_val == "reject":
+        print(
+            f"Proposal rejected. Incident {incident_id} state is 'rejected'. "
+            "Zero repair claims created."
+        )
+        return 0
+
+    # 9. Claim execution
+    sys.stderr.write("6. Claiming atomic execution...\n")
+    claim = await claim_execution(
+        incident_id=incident_id,
+        proposal_id=prop_id,
+        settings=settings,
+    )
+    print(f"Execution claimed: key={claim.execution_key}")
+
+    # 10. Execute claim
+    sys.stderr.write("7. Dispatching finite repair to sandbox...\n")
+    receipt = await execute_claim(claim, settings=settings)
+    print(
+        f"Repair receipt: result={receipt.result}, "
+        f"before_revision={receipt.before_revision}, "
+        f"after_revision={receipt.after_revision}"
+    )
+
+    if receipt.result != "applied":
+        sys.stderr.write(
+            f"Repair precondition failed: {receipt.result}\n"
+        )
+        return 1
+
+    # 11. Independent verification
+    sys.stderr.write("8. Running independent verification checkout...\n")
+    verif = await verify_checkout(
+        incident_id, uuid4(), settings=settings
+    )
+    print(
+        f"Verification: verdict={verif.verdict}, "
+        f"order_id={verif.order_id}, "
+        f"status={verif.observed_status}"
+    )
+
+    if verif.verdict == "pass":
+        print(
+            f"\nSUCCESS: Incident {incident_id} recovered to verified_recovered!"
+        )
+        return 0
+    else:
+        print(
+            f"\nFAILURE: Incident verification failed: {verif.observed_status}"
+        )
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="IncidentLab CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -795,266 +1064,7 @@ def main():
             print(json.dumps({"status": "indexed", "sections_indexed": count}, indent=2))
             sys.exit(0)
     elif args.command == "smoke-demo":
-        from uuid import UUID, uuid4
-
-        import httpx
-
-        from incidentlab.approvals import claim_execution, decide_proposal
-        from incidentlab.db import get_control_connection
-        from incidentlab.executor import (
-            CheckoutError,
-            execute_claim,
-            submit_checkout,
-            wait_for_order_fulfillment,
-        )
-        from incidentlab.graph import run_investigation
-        from incidentlab.schemas import ApprovalDecision
-        from incidentlab.verifier import verify_checkout
-
-        async def run_smoke_demo():
-            settings = Settings.from_env()
-            admin_headers = {"Authorization": f"Bearer {settings.il_sandbox_admin_token}"}
-
-            # 1. Reset target to clean state
-            sys.stderr.write("1. Resetting sandbox to healthy baseline...\n")
-            async with httpx.AsyncClient(timeout=10.0) as ac:
-                r = await ac.post(
-                    f"{settings.il_sandbox_base_url}/operator/reset",
-                    headers=admin_headers,
-                )
-                if r.status_code != 200:
-                    sys.stderr.write(f"Reset failed: {r.text}\n")
-                    return 1
-
-            # Check for active nonterminal incidents in control DB (IL-AUD-004)
-            with get_control_connection(settings) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, state
-                        FROM control.incidents
-                        WHERE state NOT IN (
-                            'verified_recovered', 'verification_failed', 'escalated',
-                            'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
-                        )
-                        LIMIT 1
-                        """
-                    )
-                    active_inc = cur.fetchone()
-                    if active_inc:
-                        sys.stderr.write(
-                            f"Active non-terminal incident exists "
-                            f"({active_inc[0]}, state='{active_inc[1]}'). "
-                            "smoke-demo fails closed. Resolve or close active incident first.\n"
-                        )
-                        return 1
-
-            # 2. Inject fault family
-            sys.stderr.write(f"2. Injecting fault family '{args.family}'...\n")
-            async with httpx.AsyncClient(timeout=10.0) as ac:
-                inj_resp = await ac.post(
-                    f"{settings.il_sandbox_base_url}/operator/inject",
-                    headers=admin_headers,
-                    json={"family": args.family, "variant_seed": 1},
-                )
-                if inj_resp.status_code != 200:
-                    sys.stderr.write(f"Inject failed: {inj_resp.text}\n")
-                    return 1
-
-            # 3. Trigger failing checkout or worker stall to observe real failure
-            failing_req_id = uuid4()
-            failing_order_id = None
-            if args.family == "worker_paused":
-                sys.stderr.write("3. Probing checkout and worker fulfillment...\n")
-                accepted = await submit_checkout(uuid4(), settings=settings)
-                failing_req_id = accepted.request_id
-                failing_order_id = accepted.order_id
-                order_view = await wait_for_order_fulfillment(
-                    accepted.order_id, settings=settings, timeout_seconds=1.5
-                )
-                if order_view.status == "fulfilled":
-                    sys.stderr.write(
-                        "ERROR: Worker was expected to be paused, but order was fulfilled!\n"
-                    )
-                    return 1
-                sys.stderr.write(
-                    f"Observed worker stall: order {failing_order_id} "
-                    f"remains in status '{order_view.status}'\n"
-                )
-                symptom_text = (
-                    "Checkout accepted order but fulfillment timed out: order remains pending"
-                )
-            else:
-                sys.stderr.write("3. Probing checkout to observe genuine failure...\n")
-                try:
-                    await submit_checkout(uuid4(), settings=settings)
-                    sys.stderr.write("ERROR: Checkout unexpectedly succeeded!\n")
-                    return 1
-                except CheckoutError as chk_err:
-                    sys.stderr.write(
-                        f"Observed checkout failure: {chk_err.code} - {chk_err.message}\n"
-                    )
-                    if chk_err.request_id:
-                        try:
-                            failing_req_id = UUID(chk_err.request_id)
-                        except Exception:
-                            pass
-                    symptom_text = f"Checkout failed: {chk_err.message}"
-
-            # 4. Start incident and run investigation
-            sys.stderr.write("4. Launching bounded agent investigation...\n")
-            incident_id = uuid4()
-            with get_control_connection(settings) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO control.incidents (id, state, symptom, request_id, order_id)
-                        VALUES (%s, 'investigating', %s, %s, %s)
-                        """,
-                        (
-                            incident_id,
-                            symptom_text,
-                            failing_req_id,
-                            failing_order_id,
-                        ),
-                    )
-                conn.commit()
-
-            investigation_state = await run_investigation(
-                incident_id, settings=settings
-            )
-            sys.stderr.write(
-                f"Investigation complete. Phase: {investigation_state.get('phase')}\n"
-            )
-
-            # Check if investigation led to escalation (e.g. upstream maintenance)
-            if investigation_state.get("phase") == "escalated":
-                diag = investigation_state.get("diagnosis", {})
-                print("\n================== INCIDENT ESCALATED ==================")
-                print(f"Incident ID:      {incident_id}")
-                print("State:            escalated")
-                print(f"Summary:          {diag.get('summary')}")
-                print(f"Uncertainty:      {diag.get('uncertainty')}")
-                print("Repair:           None (External upstream condition - zero repair receipts)")
-                print("========================================================\n")
-                print(
-                    f"SUCCESS: Incident {incident_id} escalated without repair action "
-                    "(zero repair receipts)."
-                )
-                return 0
-
-            # 5. Read proposed action
-            with get_control_connection(settings) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, payload, payload_digest, target_revision, expires_at
-                        FROM control.proposals
-                        WHERE incident_id = %s
-                        """,
-                        (incident_id,),
-                    )
-                    prop_row = cur.fetchone()
-                    if not prop_row:
-                        sys.stderr.write(
-                            "No proposal created during investigation.\n"
-                        )
-                        return 1
-
-            prop_id, payload, digest, target_rev, expires_at = prop_row
-            if not isinstance(payload, dict):
-                payload = json.loads(payload)
-
-            print("\n================== PROPOSED REPAIR ==================")
-            print(f"Incident ID:      {incident_id}")
-            print(f"Proposal ID:      {prop_id}")
-            print(f"Action:           {payload.get('action')}")
-            if "endpoint_key" in payload:
-                print(f"Endpoint Key:     {payload.get('endpoint_key')}")
-            if "worker_id" in payload:
-                print(f"Worker ID:        {payload.get('worker_id')}")
-            print(f"Target Revision:  {target_rev}")
-            print(f"Payload Digest:   {digest}")
-            print(f"Expires At:       {expires_at}")
-            print("=====================================================\n")
-
-            # 6. Approval decision
-            decision_val = args.approval
-            if decision_val == "interactive":
-                prompt_ans = (
-                    input("Approve repair proposal? [y/N]: ").strip().lower()
-                )
-                decision_val = "approve" if prompt_ans in ("y", "yes") else "reject"
-
-            sys.stderr.write(f"5. Submitting decision: '{decision_val}'...\n")
-            decision_payload = ApprovalDecision(
-                proposal_id=prop_id,
-                payload_digest=digest,
-                target_revision=target_rev,
-                decision=decision_val,
-            )
-            approval_view = await decide_proposal(
-                incident_id=incident_id,
-                owner_id="owner",
-                decision=decision_payload,
-                settings=settings,
-            )
-            print(f"Approval recorded: {approval_view.decision}")
-
-            if decision_val == "reject":
-                print(
-                    f"Proposal rejected. Incident {incident_id} state is 'rejected'. "
-                    "Zero repair claims created."
-                )
-                return 0
-
-            # 7. Claim execution
-            sys.stderr.write("6. Claiming atomic execution...\n")
-            claim = await claim_execution(
-                incident_id=incident_id,
-                proposal_id=prop_id,
-                settings=settings,
-            )
-            print(f"Execution claimed: key={claim.execution_key}")
-
-            # 8. Execute claim
-            sys.stderr.write("7. Dispatching finite repair to sandbox...\n")
-            receipt = await execute_claim(claim, settings=settings)
-            print(
-                f"Repair receipt: result={receipt.result}, "
-                f"before_revision={receipt.before_revision}, "
-                f"after_revision={receipt.after_revision}"
-            )
-
-            if receipt.result != "applied":
-                sys.stderr.write(
-                    f"Repair precondition failed: {receipt.result}\n"
-                )
-                return 1
-
-            # 9. Independent verification
-            sys.stderr.write("8. Running independent verification checkout...\n")
-            verif = await verify_checkout(
-                incident_id, uuid4(), settings=settings
-            )
-            print(
-                f"Verification: verdict={verif.verdict}, "
-                f"order_id={verif.order_id}, "
-                f"status={verif.observed_status}"
-            )
-
-            if verif.verdict == "pass":
-                print(
-                    f"\nSUCCESS: Incident {incident_id} recovered to verified_recovered!"
-                )
-                return 0
-            else:
-                print(
-                    f"\nFAILURE: Incident verification failed: {verif.observed_status}"
-                )
-                return 1
-
-        sys.exit(asyncio.run(run_smoke_demo()))
+        sys.exit(asyncio.run(run_smoke_demo(family=args.family, approval=args.approval)))
     elif args.command == "resolve-unknown":
         rc = asyncio.run(
             resolve_unknown_cli(

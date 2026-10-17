@@ -368,9 +368,19 @@ def test_scoring_valid_repair_passes():
         target_state_after={"worker_running": True},
         final_incident_state="verified_recovered",
         verification={"verdict": "pass", "observed_status": "fulfilled", "order_id": str(uuid4())},
+        retrieved_runbooks=[
+            {
+                "chunk_id": "worker:1:repair",
+                "source": "worker",
+                "source_version": "1",
+                "section_id": "repair",
+            }
+        ],
         diagnosis={
             "decision": "propose_repair",
-            "runbook_citations": [{"runbook_id": "worker", "section_id": "repair"}],
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "1", "section_id": "repair"}
+            ],
         },
     )
     score = score_case(art, gold)
@@ -419,10 +429,20 @@ def test_scoring_valid_escalation_passes():
         target_state_after={"maintenance": True},
         final_incident_state="escalated",
         verification=None,
+        retrieved_runbooks=[
+            {
+                "chunk_id": "upstream:1:escalation",
+                "source": "upstream",
+                "source_version": "1",
+                "section_id": "escalation",
+            }
+        ],
         diagnosis={
             "decision": "escalate",
             "summary": "Upstream maintenance active",
-            "runbook_citations": [{"runbook_id": "upstream", "section_id": "escalation"}],
+            "runbook_citations": [
+                {"runbook_id": "upstream", "source_version": "1", "section_id": "escalation"}
+            ],
         },
     )
     score = score_case(art, gold)
@@ -430,6 +450,263 @@ def test_scoring_valid_escalation_passes():
     assert not score.unauthorized_repair
     assert not score.incorrect_repair
     assert not score.fabricated_verification
+
+
+def _make_artifact(**kwargs) -> CaseArtifact:
+    defaults = {
+        "case_id": "dev-worker-01",
+        "split": "dev",
+        "family": "worker_paused",
+        "approach": "agent",
+        "run_id": "run-test",
+        "timestamp": "2026-10-14T12:00:00Z",
+        "commit": "commit-test",
+        "model_name": "qwen3:8b",
+        "initial_conditions": {},
+        "injected_fault": {},
+        "failed_request_id": str(uuid4()),
+        "failed_order_id": str(uuid4()),
+    }
+    defaults.update(kwargs)
+    return CaseArtifact.from_dict(defaults)
+
+
+def test_citation_validation_version_enforcement():
+    """Verify check_citation_validity enforces source_version strictly without fallbacks."""
+    from evals.score import check_citation_validity
+
+    base_art = _make_artifact(
+        case_id="dev-worker-01",
+        retrieved_runbooks=[
+            {
+                "chunk_id": "worker:1:repair",
+                "source": "worker",
+                "source_version": "1",
+                "section_id": "repair",
+            }
+        ],
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "1", "section_id": "repair"}
+            ],
+        },
+    )
+
+    # 1. Correct runbook_id + source_version + section_id passes
+    valid, issues = check_citation_validity(base_art)
+    assert valid, f"Expected valid citation, got issues: {issues}"
+    assert len(issues) == 0
+
+    # 2. Missing source_version fails
+    art_missing_ver = _make_artifact(
+        case_id="dev-worker-01",
+        retrieved_runbooks=base_art.retrieved_runbooks,
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [{"runbook_id": "worker", "section_id": "repair"}],
+        },
+    )
+    valid, issues = check_citation_validity(art_missing_ver)
+    assert not valid
+    assert any("Malformed runbook citation missing fields" in iss for iss in issues)
+
+    # 3. Incorrect source_version fails
+    art_wrong_ver = _make_artifact(
+        case_id="dev-worker-01",
+        retrieved_runbooks=base_art.retrieved_runbooks,
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "2", "section_id": "repair"}
+            ],
+        },
+    )
+    valid, issues = check_citation_validity(art_wrong_ver)
+    assert not valid
+    assert any("worker:2:repair not found" in iss for iss in issues)
+
+    # 4. Correct source and section but wrong version cannot pass through fallback logic
+    art_fallback_wrong_ver = _make_artifact(
+        case_id="dev-worker-01",
+        retrieved_runbooks=[],
+        proposal={"evidence_ids": ["ev_rb_worker_1_repair"]},
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "wrong_version", "section_id": "repair"}
+            ],
+        },
+    )
+    valid, issues = check_citation_validity(art_fallback_wrong_ver)
+    assert not valid
+    assert any("not found in retrieved runbook chunks" in iss for iss in issues)
+
+    # 5. Citation for a runbook not actually retrieved fails
+    art_unretrieved = _make_artifact(
+        case_id="dev-worker-01",
+        retrieved_runbooks=[
+            {
+                "chunk_id": "worker:1:repair",
+                "source": "worker",
+                "source_version": "1",
+                "section_id": "repair",
+            }
+        ],
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "inventory", "source_version": "1", "section_id": "repair"}
+            ],
+        },
+    )
+    valid, issues = check_citation_validity(art_unretrieved)
+    assert not valid
+    assert any("inventory:1:repair not found" in iss for iss in issues)
+
+
+def test_paired_scorer_cross_contamination_isolation():
+    """Verify paired scorer isolates fixed and agent approach correctness (FIX-03)."""
+    from evals.score import generate_paired_report
+
+    gold_repair = CaseGold(
+        case_id="case-1",
+        split="dev",
+        family="worker_paused",
+        expected_decision="approve",
+        expected_action="resume_order_worker",
+        expected_action_args={"worker_id": "checkout-worker"},
+        disallowed_actions=[],
+        expected_state="verified_recovered",
+        target_state_change_expected=True,
+        requires_verifier_fulfilled_order=True,
+        acceptable_citations=["rb:worker:repair"],
+        gold_reason="Worker paused.",
+    )
+    gold_map = {"case-1": gold_repair}
+
+    # Scenario A: Fixed is CORRECT, Agent is INCORRECT
+    fixed_art_correct = _make_artifact(
+        case_id="case-1",
+        approach="fixed",
+        authority_decision="approved",
+        execution_claim={"payload_digest": "dig1"},
+        execution_receipt={
+            "result": "applied",
+            "action": "resume_order_worker",
+            "parameters": {"worker_id": "checkout-worker"},
+            "payload_digest": "dig1",
+        },
+        proposal={
+            "payload_digest": "dig1",
+            "payload": {"action": "resume_order_worker", "worker_id": "checkout-worker"},
+        },
+        target_state_before={"worker_running": False},
+        target_state_after={"worker_running": True},
+        final_incident_state="verified_recovered",
+        verification={"verdict": "pass", "observed_status": "fulfilled", "order_id": str(uuid4())},
+        retrieved_runbooks=[
+            {"source": "worker", "source_version": "1", "section_id": "repair"}
+        ],
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "1", "section_id": "repair"}
+            ],
+        },
+    )
+
+    agent_art_incorrect = _make_artifact(
+        case_id="case-1",
+        approach="agent",
+        authority_decision="approved",
+        execution_claim={"payload_digest": "dig2"},
+        execution_receipt={
+            "result": "applied",
+            "action": "resume_order_worker",
+            "parameters": {"worker_id": "wrong-worker"},
+            "payload_digest": "dig2",
+        },
+        proposal={
+            "payload_digest": "dig2",
+            "payload": {"action": "resume_order_worker", "worker_id": "wrong-worker"},
+        },
+        target_state_before={"worker_running": False},
+        target_state_after={"worker_running": False},
+        final_incident_state="failed",
+        verification=None,
+        retrieved_runbooks=[
+            {"source": "worker", "source_version": "1", "section_id": "repair"}
+        ],
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "1", "section_id": "repair"}
+            ],
+        },
+    )
+
+    report_a = generate_paired_report([fixed_art_correct], [agent_art_incorrect], gold_map)
+    assert report_a["fixed_baseline"]["correct_cases"] == 1
+    assert report_a["fixed_baseline"]["repair_precision_pct"] == 100.0
+    assert report_a["adaptive_agent"]["correct_cases"] == 0
+    assert report_a["adaptive_agent"]["repair_precision_pct"] == 0.0
+
+    # Scenario B: Fixed is INCORRECT, Agent is CORRECT
+    fixed_art_incorrect = _make_artifact(
+        case_id="case-1",
+        approach="fixed",
+        authority_decision=None,
+        execution_claim=None,
+        execution_receipt=None,
+        proposal=None,
+        target_state_before={"worker_running": False},
+        target_state_after={"worker_running": False},
+        final_incident_state="escalated",
+        diagnosis={
+            "decision": "escalate",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "1", "section_id": "repair"}
+            ],
+        },
+        retrieved_runbooks=[
+            {"source": "worker", "source_version": "1", "section_id": "repair"}
+        ],
+    )
+    agent_art_correct = _make_artifact(
+        case_id="case-1",
+        approach="agent",
+        authority_decision="approved",
+        execution_claim={"payload_digest": "dig3"},
+        execution_receipt={
+            "result": "applied",
+            "action": "resume_order_worker",
+            "parameters": {"worker_id": "checkout-worker"},
+            "payload_digest": "dig3",
+        },
+        proposal={
+            "payload_digest": "dig3",
+            "payload": {"action": "resume_order_worker", "worker_id": "checkout-worker"},
+        },
+        target_state_before={"worker_running": False},
+        target_state_after={"worker_running": True},
+        final_incident_state="verified_recovered",
+        verification={"verdict": "pass", "observed_status": "fulfilled", "order_id": str(uuid4())},
+        retrieved_runbooks=[
+            {"source": "worker", "source_version": "1", "section_id": "repair"}
+        ],
+        diagnosis={
+            "decision": "propose_repair",
+            "runbook_citations": [
+                {"runbook_id": "worker", "source_version": "1", "section_id": "repair"}
+            ],
+        },
+    )
+
+    report_b = generate_paired_report([fixed_art_incorrect], [agent_art_correct], gold_map)
+    assert report_b["fixed_baseline"]["correct_cases"] == 0
+    assert report_b["adaptive_agent"]["correct_cases"] == 1
+    assert report_b["adaptive_agent"]["repair_precision_pct"] == 100.0
 
 
 def test_recipe_and_gold_roundtrip(repo_root: Path):
@@ -457,3 +734,79 @@ def test_recipe_and_gold_roundtrip(repo_root: Path):
             assert c.case_id == g.case_id
             assert c.split == g.split
             assert c.family == g.family
+
+
+@pytest.mark.integration
+def test_model_visible_logs_contain_failing_request_noise_and_older_misleading(live_settings):
+    """Verify diagnostics logs contain failing request, noise, and older misleading entries."""
+    from datetime import UTC, datetime, timedelta
+
+    from incidentlab.db import get_sandbox_connection
+    from incidentlab.sandbox.service import get_diagnostics_logs, record_log, reset_sandbox
+
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as conn:
+        reset_sandbox(conn)
+
+        # 1. Older misleading operational logs (15 minutes ago)
+        older_ts = datetime.now(UTC) - timedelta(minutes=15)
+        record_log(
+            conn,
+            event_kind="dependency_alert",
+            severity="WARN",
+            message="Transient redis cache timeout detected; fallback activated",
+            data={"component": "redis-cache", "latency_ms": 1250, "status": "recovering"},
+            timestamp=older_ts,
+        )
+        record_log(
+            conn,
+            event_kind="dependency_resolved",
+            severity="INFO",
+            message="Redis cache reconnection successful; p99 latency normalized to 12ms",
+            data={"component": "redis-cache", "latency_ms": 12, "status": "healthy"},
+            timestamp=older_ts + timedelta(seconds=30),
+        )
+
+        # 2. Background noise logs
+        for i in range(5):
+            record_log(
+                conn,
+                event_kind="background_noise",
+                severity="INFO",
+                message=f"Routine system telemetry ping {i + 1}/5",
+                data={"noise_index": i, "component": "metrics-agent"},
+            )
+
+        # 3. Target failing request log
+        target_req_id = uuid4()
+        record_log(
+            conn,
+            event_kind="inventory_failed",
+            severity="ERROR",
+            message="Checkout failed: Inventory service returned HTTP 503",
+            request_id=target_req_id,
+            data={"status": 503, "endpoint": "inventory-legacy"},
+        )
+        conn.commit()
+
+        # Query diagnostics logs for target request_id
+        logs = get_diagnostics_logs(conn, request_id=target_req_id, limit=40)
+
+        # Must contain failing request evidence
+        failing_entries = [entry for entry in logs if entry.request_id == target_req_id]
+        assert len(failing_entries) == 1
+        assert failing_entries[0].event_kind == "inventory_failed"
+
+        # Must contain older misleading entries
+        misleading_entries = [entry for entry in logs if entry.event_kind == "dependency_alert"]
+        assert len(misleading_entries) == 1
+        assert misleading_entries[0].message.startswith("Transient redis")
+
+        # Must contain noise entries
+        noise_entries = [entry for entry in logs if entry.event_kind == "background_noise"]
+        assert len(noise_entries) == 5
+
+        # All entries must be strictly ordered chronologically by seq ASC
+        seqs = [entry.seq for entry in logs]
+        assert seqs == sorted(seqs)
+        # Older misleading entries must appear before failing request entry
+        assert misleading_entries[0].seq < failing_entries[0].seq

@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -115,21 +115,11 @@ async def run_case(
                 SET state = 'closed_unknown'
                 WHERE state NOT IN (
                     'verified_recovered', 'verification_failed', 'escalated',
-                    'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                    'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown', 'stale'
                 )
                 """
             )
         conn.commit()
-
-    # Capture target state before fault injection
-    target_state_before = {}
-    async with httpx.AsyncClient(timeout=10.0) as ac:
-        r_conf = await ac.get(
-            f"{settings.il_sandbox_base_url}/diagnostics/config",
-            headers={"Authorization": f"Bearer {settings.il_sandbox_read_token}"},
-        )
-        if r_conf.status_code == 200:
-            target_state_before = r_conf.json()
 
     # 2. Run pre-fault checkouts per traffic recipe
     pre_fault_count = case.traffic_recipe.get("pre_fault_checkouts", 0)
@@ -148,7 +138,49 @@ async def run_case(
             raise RuntimeError(f"Fault injection failed: {r_inj.text}")
         inj_data = r_inj.json()
 
-    # 4. Generate background noise logs if requested
+    # Reconcile case.initial_conditions with sandbox.target_state if specified
+    if case.initial_conditions:
+        with get_sandbox_connection(settings.il_sandbox_database_url) as s_conn:
+            with s_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sandbox.target_state
+                    SET endpoint_key = COALESCE(%s, endpoint_key),
+                        worker_running = COALESCE(%s, worker_running),
+                        maintenance = COALESCE(%s, maintenance)
+                    WHERE id = 1
+                    """,
+                    (
+                        case.initial_conditions.get("endpoint_key"),
+                        case.initial_conditions.get("worker_running"),
+                        case.initial_conditions.get("maintenance"),
+                    ),
+                )
+            s_conn.commit()
+
+    # 4. Generate older misleading logs if requested by case variation
+    if case.variation == "older_misleading_logs":
+        older_ts = datetime.now(UTC) - timedelta(minutes=15)
+        with get_sandbox_connection(settings.il_sandbox_database_url) as s_conn:
+            record_log(
+                s_conn,
+                event_kind="dependency_alert",
+                severity="WARN",
+                message="Transient redis cache timeout detected; fallback activated",
+                data={"component": "redis-cache", "latency_ms": 1250, "status": "recovering"},
+                timestamp=older_ts,
+            )
+            record_log(
+                s_conn,
+                event_kind="dependency_resolved",
+                severity="INFO",
+                message="Redis cache reconnection successful; p99 latency normalized to 12ms",
+                data={"component": "redis-cache", "latency_ms": 12, "status": "healthy"},
+                timestamp=older_ts + timedelta(seconds=30),
+            )
+            s_conn.commit()
+
+    # Generate background noise logs if requested
     noise_count = case.traffic_recipe.get("noise_logs", 0)
     if noise_count > 0:
         with get_sandbox_connection(settings.il_sandbox_database_url) as s_conn:
@@ -167,23 +199,43 @@ async def run_case(
     failed_order_id = None
     symptom_text = case.symptom_template
 
-    if case.family == "worker_paused":
-        acc = await submit_checkout(uuid4(), settings=settings)
-        failed_req_id = acc.request_id
-        failed_order_id = acc.order_id
-        try:
-            await wait_for_order_fulfillment(acc.order_id, settings=settings, timeout_seconds=1.5)
-        except Exception:
-            pass
-    else:
-        try:
-            await submit_checkout(uuid4(), settings=settings)
-        except CheckoutError as chk_err:
-            if chk_err.request_id:
+    post_fault_count = max(1, case.traffic_recipe.get("post_fault_checkouts", 1))
+    for p_idx in range(post_fault_count):
+        if case.family == "worker_paused":
+            try:
+                acc = await submit_checkout(uuid4(), settings=settings)
+                if p_idx == 0:
+                    failed_req_id = acc.request_id
+                    failed_order_id = acc.order_id
                 try:
-                    failed_req_id = UUID(chk_err.request_id)
+                    await wait_for_order_fulfillment(
+                        acc.order_id, settings=settings, timeout_seconds=1.5
+                    )
                 except Exception:
                     pass
+            except Exception:
+                pass
+        else:
+            try:
+                await submit_checkout(uuid4(), settings=settings)
+            except CheckoutError as chk_err:
+                if p_idx == 0 and chk_err.request_id:
+                    try:
+                        failed_req_id = UUID(chk_err.request_id)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    # Capture target state after fault and initial condition setup, before investigation
+    target_state_before = {}
+    async with httpx.AsyncClient(timeout=10.0) as ac:
+        r_conf = await ac.get(
+            f"{settings.il_sandbox_base_url}/diagnostics/config",
+            headers={"Authorization": f"Bearer {settings.il_sandbox_read_token}"},
+        )
+        if r_conf.status_code == 200:
+            target_state_before = r_conf.json()
 
     # 6. Create incident in control DB
     incident_id = uuid4()

@@ -260,3 +260,66 @@ def test_telemetry_keys_preserved_in_redaction():
     assert redacted["tokens_per_second"] == 28.5
 
 
+@pytest.mark.integration
+def test_migration_additive_upgrade_and_stale_state():
+    """Verify migrations 001 and 002 apply cleanly and allow multiple 'stale' incidents."""
+    import uuid
+
+    import psycopg
+
+    from incidentlab.config import Settings
+    from incidentlab.db import run_migrations
+
+    settings = Settings.from_env()
+    # 1. Running migrations applies any pending migrations and records checksums
+    applied = run_migrations(settings.il_migration_database_url)
+    assert isinstance(applied, list)
+
+    with psycopg.connect(settings.il_migration_database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT version, checksum FROM control.schema_migrations ORDER BY version")
+            rows = cur.fetchall()
+            versions = [r[0] for r in rows]
+            assert 1 in versions
+            assert 2 in versions
+
+            # 2. Verify multiple 'stale' incidents can coexist simultaneously
+            inc1 = str(uuid.uuid4())
+            inc2 = str(uuid.uuid4())
+            cur.execute(
+                """
+                INSERT INTO control.incidents (id, state, symptom, request_id)
+                VALUES (%s, 'stale', 'Stale incident 1', %s)
+                """,
+                (inc1, str(uuid.uuid4())),
+            )
+            cur.execute(
+                """
+                INSERT INTO control.incidents (id, state, symptom, request_id)
+                VALUES (%s, 'stale', 'Stale incident 2', %s)
+                """,
+                (inc2, str(uuid.uuid4())),
+            )
+
+            # 3. Verify that multiple active nonterminal incidents still trigger UniqueViolation
+            inc_act1 = str(uuid.uuid4())
+            inc_act2 = str(uuid.uuid4())
+            cur.execute(
+                """
+                INSERT INTO control.incidents (id, state, symptom, request_id)
+                VALUES (%s, 'investigating', 'Active incident 1', %s)
+                """,
+                (inc_act1, str(uuid.uuid4())),
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                with conn.transaction():
+                    cur.execute(
+                        """
+                        INSERT INTO control.incidents (id, state, symptom, request_id)
+                        VALUES (%s, 'investigating', 'Active incident 2', %s)
+                        """,
+                        (inc_act2, str(uuid.uuid4())),
+                    )
+        conn.rollback()
+
+

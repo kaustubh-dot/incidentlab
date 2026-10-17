@@ -24,6 +24,7 @@ from incidentlab.schemas import (
     Proposal,
     RepairPayload,
     ResumeOrderWorkerPayload,
+    RunbookCitation,
     SetInventoryEndpointPayload,
 )
 
@@ -234,6 +235,47 @@ def _get_remaining_active_deadline_seconds(
     """Calculate remaining active deadline seconds from monotonic timer and prior active_ms."""
     elapsed_seconds = (time.monotonic() - t0) + (active_ms / 1000.0)
     return float(settings.il_active_deadline_seconds) - elapsed_seconds
+
+
+def validate_runbook_citations(
+    citations: list[RunbookCitation],
+    retrieved_runbooks: list[dict[str, Any]],
+) -> list[str]:
+    """Validate that citations match a retrieved runbook chunk by source, version, and section.
+
+    Enforces architecture contract: RunbookCitation = {runbook_id, source_version, section_id}.
+    Does NOT allow unversioned string/chunk-ID fallbacks to bypass source_version checking.
+    Returns list of unretrieved citation strings, empty if all valid.
+    """
+    valid_chunks: set[tuple[str, str, str]] = set()
+    for rb in retrieved_runbooks:
+        src = (rb.get("source") or "").lower().strip()
+        ver = str(rb.get("source_version") or "").lower().strip()
+        sec = (rb.get("section_id") or "").lower().strip()
+        if src and ver and sec:
+            valid_chunks.add((src, ver, sec))
+
+    unretrieved = []
+    for cit in citations:
+        c_src = cit.runbook_id.lower().strip()
+        c_ver = cit.source_version.lower().strip()
+        c_sec = cit.section_id.lower().strip()
+
+        if not c_ver:
+            unretrieved.append(f"{cit.runbook_id}:missing_version:{cit.section_id}")
+            continue
+
+        matched = False
+        for r_src, r_ver, r_sec in valid_chunks:
+            if (c_src == r_src or c_src in r_src) and (c_ver == r_ver) and (
+                c_sec == r_sec or c_sec in r_sec or r_sec in c_sec
+            ):
+                matched = True
+                break
+        if not matched:
+            unretrieved.append(f"{cit.runbook_id}:{cit.source_version}:{cit.section_id}")
+
+    return unretrieved
 
 
 async def run_investigation(
@@ -643,37 +685,11 @@ async def run_investigation(
             state,
             f"Diagnosis cites unpersisted evidence IDs: {invalid_evidence_ids}",
         )
-
-    # IL-AUD-007: Validate citations against retrieved runbook chunks before proposal creation
-    retrieved_sections = set()
-    for rb in state.get("retrieved_runbooks", []):
-        src = (rb.get("source") or "").lower().strip()
-        ver = str(rb.get("source_version") or "").lower().strip()
-        sec = (rb.get("section_id") or "").lower().strip()
-        cid = (rb.get("chunk_id") or "").lower().strip()
-        retrieved_sections.add((src, ver, sec))
-        retrieved_sections.add(cid)
-
-    unretrieved_citations = []
-    for cit in diag.runbook_citations:
-        c_src = cit.runbook_id.lower().strip()
-        c_ver = cit.source_version.lower().strip()
-        c_sec = cit.section_id.lower().strip()
-        matched = False
-        for item in retrieved_sections:
-            if isinstance(item, tuple):
-                r_src, r_ver, r_sec = item
-                if (c_src == r_src or c_src in r_src) and (c_ver == r_ver) and (
-                    c_sec == r_sec or c_sec in r_sec or r_sec in c_sec
-                ):
-                    matched = True
-                    break
-            elif isinstance(item, str):
-                if c_src in item and c_sec in item:
-                    matched = True
-                    break
-        if not matched:
-            unretrieved_citations.append(f"{cit.runbook_id}:{cit.source_version}:{cit.section_id}")
+    # Validate citations against retrieved runbook chunks before proposal creation (FIX-02)
+    unretrieved_citations = validate_runbook_citations(
+        diag.runbook_citations,
+        state.get("retrieved_runbooks", []),
+    )
 
     if unretrieved_citations:
         logger.warning(
