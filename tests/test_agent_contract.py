@@ -87,7 +87,7 @@ def test_diagnosis_validation():
 
 
 def test_graph_citation_validation_version_strictness():
-    """Verify graph citation validation strictly enforces version and rejects fallbacks (FIX-02)."""
+    """Verify graph citation validation strictly enforces version and rejects fallbacks."""
     from incidentlab.graph import validate_runbook_citations
     from incidentlab.schemas import RunbookCitation
 
@@ -138,6 +138,66 @@ def test_graph_citation_validation_version_strictness():
     unretrieved_rb = validate_runbook_citations(cit_unretrieved_rb, retrieved_rbs)
     assert len(unretrieved_rb) == 1
     assert unretrieved_rb[0] == "inventory:1:repair"
+
+
+def test_adversarial_near_match_citation_validation_and_agreement():
+    """Verify adversarial near-match citations fail and graph/scorer validators agree (FINAL-02)."""
+    from evals.score import CaseArtifact, check_citation_validity
+    from incidentlab.graph import validate_runbook_citations
+    from incidentlab.schemas import RunbookCitation
+
+    retrieved = [
+        {
+            "chunk_id": "worker:1:repair",
+            "source": "worker",
+            "source_version": "1",
+            "section_id": "repair",
+        }
+    ]
+
+    cases = [
+        # Must pass
+        ("worker", "1", "repair", True),
+        ("Worker", "1", "Repair", True),
+        ("  worker  ", " 1 ", " repair ", True),
+        # Adversarial near-matches: must fail
+        ("worker", "1", "repair_extra", False),
+        ("worker", "1", "extra_repair", False),
+        ("worker", "1", "repair-old", False),
+        ("worker_extra", "1", "repair", False),
+        ("checkout-worker", "1", "repair", False),
+        ("worker", "2", "repair", False),
+        ("inventory", "1", "repair", False),
+    ]
+
+    for src, ver, sec, expected in cases:
+        # Runtime graph validator
+        cits = [RunbookCitation(runbook_id=src, source_version=ver, section_id=sec)]
+        unretrieved = validate_runbook_citations(cits, retrieved)
+        graph_valid = len(unretrieved) == 0
+        assert graph_valid == expected, (
+            f"Graph validator mismatch for {src}/{ver}/{sec}: expected {expected}"
+        )
+
+        # Scorer validator
+        art = CaseArtifact.from_dict({
+            "case_id": "test-adversarial-citation",
+            "retrieved_runbooks": retrieved,
+            "diagnosis": {
+                "runbook_citations": [
+                    {"runbook_id": src, "source_version": ver, "section_id": sec}
+                ]
+            },
+        })
+        scorer_valid, issues = check_citation_validity(art)
+        assert scorer_valid == expected, (
+            f"Scorer mismatch for {src}/{ver}/{sec}: expected {expected}, issues={issues}"
+        )
+
+        # Strict agreement between graph and scorer
+        assert graph_valid == scorer_valid, (
+            f"Graph and Scorer disagree on citation {src}/{ver}/{sec}"
+        )
 
 
 def test_build_context_token_bounds_and_notes():

@@ -238,42 +238,52 @@ def _get_remaining_active_deadline_seconds(
 
 
 def validate_runbook_citations(
-    citations: list[RunbookCitation],
+    citations: list[RunbookCitation | dict[str, Any]],
     retrieved_runbooks: list[dict[str, Any]],
 ) -> list[str]:
     """Validate that citations match a retrieved runbook chunk by source, version, and section.
 
-    Enforces architecture contract: RunbookCitation = {runbook_id, source_version, section_id}.
-    Does NOT allow unversioned string/chunk-ID fallbacks to bypass source_version checking.
+    Enforces exact normalized tuple equality: (runbook_id, source_version, section_id).
+    Does NOT allow substring, prefix, suffix, fuzzy, or containment matching.
     Returns list of unretrieved citation strings, empty if all valid.
     """
     valid_chunks: set[tuple[str, str, str]] = set()
     for rb in retrieved_runbooks:
-        src = (rb.get("source") or "").lower().strip()
-        ver = str(rb.get("source_version") or "").lower().strip()
-        sec = (rb.get("section_id") or "").lower().strip()
+        src = str(rb.get("source") or "").strip().lower()
+        ver = str(rb.get("source_version") or "").strip().lower()
+        sec = str(rb.get("section_id") or "").strip().lower()
+        cid = str(rb.get("chunk_id") or "").strip().lower()
         if src and ver and sec:
             valid_chunks.add((src, ver, sec))
+        elif cid:
+            parts = [p.strip().lower() for p in cid.split(":")]
+            if len(parts) == 3 and all(parts):
+                valid_chunks.add((parts[0], parts[1], parts[2]))
 
-    unretrieved = []
+    unretrieved: list[str] = []
     for cit in citations:
-        c_src = cit.runbook_id.lower().strip()
-        c_ver = cit.source_version.lower().strip()
-        c_sec = cit.section_id.lower().strip()
+        if isinstance(cit, dict):
+            c_src = str(cit.get("runbook_id", "") or "").strip().lower()
+            c_ver = str(cit.get("source_version", "") or "").strip().lower()
+            c_sec = str(cit.get("section_id", "") or "").strip().lower()
+            raw_src = cit.get("runbook_id", "")
+            raw_ver = cit.get("source_version", "")
+            raw_sec = cit.get("section_id", "")
+        else:
+            c_src = str(getattr(cit, "runbook_id", "") or "").strip().lower()
+            c_ver = str(getattr(cit, "source_version", "") or "").strip().lower()
+            c_sec = str(getattr(cit, "section_id", "") or "").strip().lower()
+            raw_src = getattr(cit, "runbook_id", "")
+            raw_ver = getattr(cit, "source_version", "")
+            raw_sec = getattr(cit, "section_id", "")
 
         if not c_ver:
-            unretrieved.append(f"{cit.runbook_id}:missing_version:{cit.section_id}")
+            unretrieved.append(f"{raw_src}:missing_version:{raw_sec}")
             continue
 
-        matched = False
-        for r_src, r_ver, r_sec in valid_chunks:
-            if (c_src == r_src or c_src in r_src) and (c_ver == r_ver) and (
-                c_sec == r_sec or c_sec in r_sec or r_sec in c_sec
-            ):
-                matched = True
-                break
-        if not matched:
-            unretrieved.append(f"{cit.runbook_id}:{cit.source_version}:{cit.section_id}")
+        citation_tuple = (c_src, c_ver, c_sec)
+        if citation_tuple not in valid_chunks:
+            unretrieved.append(f"{raw_src}:{raw_ver}:{raw_sec}")
 
     return unretrieved
 

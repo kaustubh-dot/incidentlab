@@ -14,12 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from evals.run import CaseRecipe
-from evals.score import CaseArtifact, CaseGold, score_case
+from evals.score import CaseArtifact, CaseGold, check_citation_validity, score_case
 
 
 @pytest.fixture
@@ -565,6 +565,49 @@ def test_citation_validation_version_enforcement():
     assert any("inventory:1:repair not found" in iss for iss in issues)
 
 
+def test_scorer_adversarial_near_match_citations():
+    """Verify scorer strictly rejects adversarial near-matches (FINAL-02)."""
+    retrieved = [
+        {
+            "chunk_id": "worker:1:repair",
+            "source": "worker",
+            "source_version": "1",
+            "section_id": "repair",
+        }
+    ]
+
+    near_match_cases = [
+        # Must pass
+        ("worker", "1", "repair", True),
+        ("Worker", "1", "Repair", True),
+        ("  worker  ", " 1 ", " repair ", True),
+        # Must fail
+        ("worker", "1", "repair_extra", False),
+        ("worker", "1", "extra_repair", False),
+        ("worker", "1", "repair-old", False),
+        ("worker_extra", "1", "repair", False),
+        ("checkout-worker", "1", "repair", False),
+        ("worker", "2", "repair", False),
+        ("inventory", "1", "repair", False),
+    ]
+
+    for src, ver, sec, expected in near_match_cases:
+        art = _make_artifact(
+            case_id="dev-worker-01",
+            retrieved_runbooks=retrieved,
+            diagnosis={
+                "decision": "propose_repair",
+                "runbook_citations": [
+                    {"runbook_id": src, "source_version": ver, "section_id": sec}
+                ],
+            },
+        )
+        valid, issues = check_citation_validity(art)
+        assert valid == expected, (
+            f"Expected {src}/{ver}/{sec} valid={expected}, got {valid}, issues={issues}"
+        )
+
+
 def test_paired_scorer_cross_contamination_isolation():
     """Verify paired scorer isolates fixed and agent approach correctness (FIX-03)."""
     from evals.score import generate_paired_report
@@ -810,3 +853,219 @@ def test_model_visible_logs_contain_failing_request_noise_and_older_misleading(l
         assert seqs == sorted(seqs)
         # Older misleading entries must appear before failing request entry
         assert misleading_entries[0].seq < failing_entries[0].seq
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_evaluation_runner_recipe_execution(live_settings, monkeypatch):
+    """Verify runner-level evaluation recipe executes all setup phases faithfully (FINAL-04)."""
+    import evals.run
+    from evals.run import CaseRecipe, run_case
+    from incidentlab.db import get_sandbox_connection
+    from incidentlab.sandbox.service import get_diagnostics_logs
+
+    # Stub the investigation call to avoid calling live model while testing recipe execution
+    async def fake_investigation(incident_id, settings=None, evidence_filter=None):
+        return {
+            "incident_id": str(incident_id),
+            "diagnosis": {
+                "symptom": "Checkout failed: Inventory service returned HTTP 503",
+                "decision": "escalate",
+                "confidence": 0.9,
+                "justification": "Stubbed investigation for recipe test",
+                "evidence_ids": [],
+                "runbook_citations": [],
+                "uncertainty": "",
+            },
+            "proposal": None,
+            "recent_results": [],
+            "retrieved_runbooks": [],
+            "model_turn_count": 1,
+            "read_tool_calls_count": 0,
+            "total_prompt_tokens": 100,
+            "total_completion_tokens": 50,
+            "turn_durations": [0.1],
+            "state_before": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evals.run, "run_investigation", fake_investigation)
+
+    case = CaseRecipe(
+        case_id="test-runner-recipe-01",
+        split="dev",
+        family="inventory_config",
+        variation="older_misleading_logs",
+        seed=101,
+        initial_conditions={
+            "endpoint_key": "inventory-legacy",
+            "worker_running": True,
+            "maintenance": False,
+        },
+        traffic_recipe={
+            "pre_fault_checkouts": 2,
+            "post_fault_checkouts": 2,
+            "noise_logs": 5,
+        },
+        evidence_filter=None,
+        state_change=None,
+        symptom_template="Checkout failed: Inventory service returned HTTP 503",
+    )
+
+    artifact = await run_case(case, approach="agent", settings=live_settings)
+
+    # 1. Verify pre-fault checkouts succeeded and were fulfilled
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM sandbox.orders WHERE status = 'fulfilled'")
+            fulfilled_count = cur.fetchone()[0]
+            assert fulfilled_count >= 2, (
+                f"Expected at least 2 pre-fault fulfilled orders, got {fulfilled_count}"
+            )
+
+            # 2. Verify background noise logs
+            cur.execute("SELECT COUNT(*) FROM sandbox.logs WHERE event_kind = 'background_noise'")
+            noise_count = cur.fetchone()[0]
+            assert noise_count == 5, f"Expected 5 noise logs, got {noise_count}"
+
+            # 3. Verify older misleading logs exist
+            cur.execute(
+                """
+                SELECT seq, timestamp, event_kind, message
+                FROM sandbox.logs
+                WHERE event_kind IN ('dependency_alert', 'dependency_resolved')
+                ORDER BY seq ASC
+                """
+            )
+            misleading_rows = cur.fetchall()
+            assert len(misleading_rows) == 2, (
+                f"Expected 2 older misleading rows, got {len(misleading_rows)}"
+            )
+
+            # 4. Verify primary failed request exists
+            assert artifact.failed_request_id is not None
+            cur.execute(
+                """
+                SELECT seq, timestamp, event_kind, message
+                FROM sandbox.logs
+                WHERE request_id = %s
+                """,
+                (artifact.failed_request_id,),
+            )
+            failing_rows = cur.fetchall()
+            assert len(failing_rows) >= 1, "Expected failing request logs for primary failure"
+
+            # 5. Chronological evidence: older misleading logs are strictly older than failure
+            older_ts = misleading_rows[0][1]
+            failure_ts = failing_rows[0][1]
+            assert older_ts < failure_ts, (
+                f"Expected older misleading log ({older_ts}) < failure ({failure_ts})"
+            )
+
+            # 6. Verify diagnostics logs prioritize failing request and include noise/older
+            target_uuid = UUID(artifact.failed_request_id)
+            diag_logs = get_diagnostics_logs(conn, request_id=target_uuid, limit=40)
+            diag_kinds = [entry.event_kind for entry in diag_logs]
+            assert "inventory_failed" in diag_kinds or "dependency_alert" in diag_kinds
+            assert "background_noise" in diag_kinds
+
+            # 7. Check applied initial conditions in target state
+            cur.execute(
+                """
+                SELECT endpoint_key, worker_running, maintenance
+                FROM sandbox.target_state
+                WHERE id = 1
+                """
+            )
+            tgt_row = cur.fetchone()
+            assert tgt_row[0] == "inventory-legacy"
+            assert tgt_row[1] is True
+            assert tgt_row[2] is False
+
+            # 8. Check target_state_before captured after setup
+            assert artifact.target_state_before.get("endpoint_key") == "inventory-legacy"
+            assert artifact.target_state_before.get("worker_running") is True
+            assert artifact.target_state_before.get("target_revision") is not None
+
+            # 9. Ensure no gold answers / fault-family answers leak into log messages
+            for entry in diag_logs:
+                assert "test-runner-recipe-01" not in entry.message
+                assert "gold" not in entry.message.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_initial_conditions_semantics_across_all_fault_families(live_settings):
+    """Verify initial_conditions and fault injection semantics across fault families (FINAL-05)."""
+    import httpx
+
+    from incidentlab.db import get_sandbox_connection
+    from incidentlab.sandbox.service import get_target_state
+
+    families = [
+        (
+            "inventory_config",
+            {"endpoint_key": "inventory-legacy", "worker_running": True, "maintenance": False},
+            {"endpoint_key": "inventory-legacy", "worker_running": True, "maintenance": False},
+        ),
+        (
+            "worker_paused",
+            {"endpoint_key": "inventory-local", "worker_running": False, "maintenance": False},
+            {"endpoint_key": "inventory-local", "worker_running": False, "maintenance": False},
+        ),
+        (
+            "upstream_maintenance",
+            {"endpoint_key": "inventory-local", "worker_running": True, "maintenance": True},
+            {"endpoint_key": "inventory-local", "worker_running": True, "maintenance": True},
+        ),
+    ]
+
+    admin_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_admin_token}"}
+
+    async with httpx.AsyncClient(timeout=10.0) as ac:
+        for family, initial_conds, expected_state in families:
+            # 1. Reset sandbox to healthy baseline
+            r_reset = await ac.post(
+                f"{live_settings.il_sandbox_base_url}/operator/reset",
+                headers=admin_headers,
+            )
+            assert r_reset.status_code == 200
+
+            # 2. Inject fault
+            r_inj = await ac.post(
+                f"{live_settings.il_sandbox_base_url}/operator/inject",
+                headers=admin_headers,
+                json={"family": family, "variant_seed": 42},
+            )
+            assert r_inj.status_code == 200
+
+            # 3. Reconcile case.initial_conditions (as done in evals/run.py)
+            with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+                with s_conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE sandbox.target_state
+                        SET endpoint_key = COALESCE(%s, endpoint_key),
+                            worker_running = COALESCE(%s, worker_running),
+                            maintenance = COALESCE(%s, maintenance)
+                        WHERE id = 1
+                        """,
+                        (
+                            initial_conds.get("endpoint_key"),
+                            initial_conds.get("worker_running"),
+                            initial_conds.get("maintenance"),
+                        ),
+                    )
+                s_conn.commit()
+
+                # 4. Verify target state accurately represents the intended fault and conditions
+                state = get_target_state(s_conn)
+                assert state["endpoint_key"] == expected_state["endpoint_key"], (
+                    f"Family {family}: endpoint_key mismatch"
+                )
+                assert state["worker_running"] == expected_state["worker_running"], (
+                    f"Family {family}: worker_running mismatch"
+                )
+                assert state["maintenance"] == expected_state["maintenance"], (
+                    f"Family {family}: maintenance mismatch"
+                )

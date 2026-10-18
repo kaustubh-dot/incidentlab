@@ -382,61 +382,61 @@ def check_citation_validity(artifact: CaseArtifact) -> tuple[bool, list[str]]:
 
     known_chunks: set[tuple[str, str, str]] = set()
     for rb in artifact.retrieved_runbooks:
-        src = (rb.get("source") or "").lower().strip()
-        ver = str(rb.get("source_version") or "").lower().strip()
-        sec = (rb.get("section_id") or "").lower().strip()
-        cid = (rb.get("chunk_id") or "").lower().strip()
+        src = str(rb.get("source") or "").strip().lower()
+        ver = str(rb.get("source_version") or "").strip().lower()
+        sec = str(rb.get("section_id") or "").strip().lower()
+        cid = str(rb.get("chunk_id") or "").strip().lower()
         if src and ver and sec:
             known_chunks.add((src, ver, sec))
         elif cid:
-            parts = cid.split(":")
-            if len(parts) >= 3:
-                known_chunks.add((parts[0].strip(), parts[1].strip(), parts[2].strip()))
+            parts = [p.strip().lower() for p in cid.split(":")]
+            if len(parts) == 3 and all(parts):
+                known_chunks.add((parts[0], parts[1], parts[2]))
 
     # Fallback to proposal evidence_ids only if they contain structured versioned runbook tags
     if not known_chunks and artifact.proposal:
         for eid in artifact.proposal.get("evidence_ids", []):
             if "rb" in eid:
-                clean_eid = eid.lower().replace("ev_rb_", "").strip()
-                parts = clean_eid.split("_")
-                if len(parts) >= 3:
+                clean_eid = eid.strip().lower().replace("ev_rb_", "")
+                if ":" in clean_eid:
+                    parts = [p.strip() for p in clean_eid.split(":")]
+                else:
+                    parts = [p.strip() for p in clean_eid.split("_")]
+                if len(parts) == 3 and all(parts):
                     known_chunks.add((parts[0], parts[1], parts[2]))
-                elif ":" in clean_eid:
-                    parts = clean_eid.split(":")
-                    if len(parts) >= 3:
-                        known_chunks.add((parts[0], parts[1], parts[2]))
 
     if not known_chunks:
         return False, ["Retrieved runbook chunks list is empty; citations cannot be resolved"]
 
     issues: list[str] = []
     for cit in citations:
-        rb_id = str(cit.get("runbook_id", "")).strip().lower()
-        sec_id = str(cit.get("section_id", "")).strip().lower()
-        cit_ver = str(cit.get("source_version", "")).strip().lower()
+        if isinstance(cit, dict):
+            rb_id = str(cit.get("runbook_id", "") or "").strip().lower()
+            cit_ver = str(cit.get("source_version", "") or "").strip().lower()
+            sec_id = str(cit.get("section_id", "") or "").strip().lower()
+            raw_rb = cit.get("runbook_id", "")
+            raw_ver = cit.get("source_version", "")
+            raw_sec = cit.get("section_id", "")
+        else:
+            rb_id = str(getattr(cit, "runbook_id", "") or "").strip().lower()
+            cit_ver = str(getattr(cit, "source_version", "") or "").strip().lower()
+            sec_id = str(getattr(cit, "section_id", "") or "").strip().lower()
+            raw_rb = getattr(cit, "runbook_id", "")
+            raw_ver = getattr(cit, "source_version", "")
+            raw_sec = getattr(cit, "section_id", "")
 
         if not rb_id or not sec_id or not cit_ver:
             issues.append(f"Malformed runbook citation missing fields: {cit}")
             continue
 
-        base_rb = rb_id.split(":")[0]
-        if base_rb not in ("inventory", "worker", "upstream"):
-            issues.append(f"Unknown runbook in citation: {rb_id}")
+        if rb_id not in ("inventory", "worker", "upstream"):
+            issues.append(f"Unknown runbook in citation: {raw_rb}")
             continue
 
-        resolved = False
-        for k_src, k_ver, k_sec in known_chunks:
-            if (
-                (base_rb == k_src or base_rb in k_src)
-                and (cit_ver == k_ver)
-                and (sec_id == k_sec or sec_id in k_sec or k_sec in sec_id)
-            ):
-                resolved = True
-                break
-
-        if not resolved:
+        citation_tuple = (rb_id, cit_ver, sec_id)
+        if citation_tuple not in known_chunks:
             issues.append(
-                f"Citation {rb_id}:{cit_ver}:{sec_id} not found in retrieved runbook chunks"
+                f"Citation {raw_rb}:{raw_ver}:{raw_sec} not found in retrieved runbook chunks"
             )
 
     return (len(issues) == 0, issues)

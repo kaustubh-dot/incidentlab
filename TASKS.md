@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Complete audit remediation pass FIX-01 through FIX-08, verify clean local and GitHub Actions CI, and synchronize main.
+**Next action:** Audit software remediation complete; quality/evaluation gate remains open (held-out quality gate 10/18 < 15/18; IL-12 OPEN / FAILED; P6 OPEN / IN PROGRESS).
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -494,7 +494,16 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
     - FIX-07: Prioritized request_id rows over background noise in diagnostics logs to prevent starvation.
     - FIX-08: Maintained honest documentation ledger.
   - **Quality Gate:** Held-out quality gate 10/18 < 15/18 remains **OPEN / FAILED** (zero unauthorized mutations, zero incorrect repairs, zero fabricated verifications verified). IL-12 remains **OPEN / FAILED**. Phase P6 remains **OPEN / IN PROGRESS**.
-  - **Next action:** Verify complete offline test suite in evaluation container and via GitHub Actions on `implementation/build`.
+- **Final Verification & Citation Hardening Pass (2026-10-18):**
+  - **Status:** Audit software remediation verified; quality/evaluation gate remains open.
+  - **Remediations:**
+    - FINAL-01: Enforced exact normalized tuple equality (runbook_id, source_version, section_id) across runtime graph validation and evaluation scorer; disallowed substring, prefix, suffix, and containment matching.
+    - FINAL-02: Added adversarial near-match regression tests and proved strict agreement between graph and scorer validators.
+    - FINAL-03: Added genuine v1 -> v2 migration upgrade regression test verifying canonical checksum preservation and partial index upgrade in an isolated temporary database.
+    - FINAL-04: Added runner-level evaluation recipe integration test exercising pre/post fault traffic, noise logs, older misleading logs, and initial condition setup.
+    - FINAL-05: Verified and documented initial_conditions and fault injection semantics across all three fault families (inventory_config, worker_paused, upstream_maintenance).
+    - FINAL-06: Preserved honest project ledger (held-out 10/18 < 15/18 OPEN / FAILED, IL-12 OPEN / FAILED, Phase P6 OPEN / IN PROGRESS).
+  - **Next action:** Verify complete offline test suite via Docker evaluation container and GitHub Actions CI.
 
 ## Requirement Evidence Mapping (IL-01 – IL-14)
 

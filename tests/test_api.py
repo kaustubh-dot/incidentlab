@@ -323,3 +323,147 @@ def test_migration_additive_upgrade_and_stale_state():
         conn.rollback()
 
 
+@pytest.mark.integration
+def test_migration_genuine_v1_to_v2_upgrade(live_settings, tmp_path):
+    """Verify genuine v1 -> v2 migration upgrade from a pre-existing 001 installation (FINAL-03)."""
+    import hashlib
+    import urllib.parse
+    import uuid
+    from pathlib import Path
+
+    import psycopg
+
+    from incidentlab.db import run_migrations
+
+    parsed = urllib.parse.urlsplit(live_settings.il_migration_database_url)
+    tmp_db_name = f"test_v1_upgrade_{uuid.uuid4().hex[:8]}"
+    tmp_db_dsn = urllib.parse.urlunsplit(parsed._replace(path=f"/{tmp_db_name}"))
+
+    # Create temporary database
+    with psycopg.connect(live_settings.il_migration_database_url, autocommit=True) as admin_conn:
+        with admin_conn.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{tmp_db_name}"')
+
+    try:
+        repo_migrations = Path(__file__).resolve().parent.parent / "migrations"
+        v1_sql_path = repo_migrations / "001_initial.sql"
+        canonical_v1_content = v1_sql_path.read_text(encoding="utf-8")
+        canonical_v1_checksum = hashlib.sha256(canonical_v1_content.encode("utf-8")).hexdigest()
+
+        # Step 1: Create an isolated v1-only migrations directory
+        v1_dir = tmp_path / "v1_migrations"
+        v1_dir.mkdir()
+        (v1_dir / "001_initial.sql").write_text(canonical_v1_content, encoding="utf-8")
+
+        # Step 2: Run migrations with 001 only (simulating old release)
+        applied_v1 = run_migrations(
+            tmp_db_dsn,
+            migrations_dir=v1_dir,
+        )
+        assert applied_v1 == ["001_initial.sql"]
+
+        # Confirm control.schema_migrations contains only version 1 with canonical checksum
+        with psycopg.connect(tmp_db_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT version, checksum FROM control.schema_migrations ORDER BY version"
+                )
+                rows = cur.fetchall()
+                assert len(rows) == 1
+                assert rows[0][0] == 1
+                assert rows[0][1] == canonical_v1_checksum
+
+                # Step 3 & 4: Confirm old ix_one_active_incident definition treats 'stale' as active
+                inc1 = str(uuid.uuid4())
+                inc2 = str(uuid.uuid4())
+                cur.execute(
+                    """
+                    INSERT INTO control.incidents (id, state, symptom, request_id)
+                    VALUES (%s, 'stale', 'Stale 1 under v1', %s)
+                    """,
+                    (inc1, str(uuid.uuid4())),
+                )
+                with pytest.raises(psycopg.errors.UniqueViolation):
+                    with conn.transaction():
+                        cur.execute(
+                            """
+                            INSERT INTO control.incidents (id, state, symptom, request_id)
+                            VALUES (%s, 'stale', 'Stale 2 under v1', %s)
+                            """,
+                            (inc2, str(uuid.uuid4())),
+                        )
+            conn.rollback()
+
+        # Step 5: Run current migration runner with both migrations available
+        applied_v2 = run_migrations(
+            tmp_db_dsn,
+            migrations_dir=repo_migrations,
+        )
+        # Verify 001 was skipped as already valid (no checksum error), and 002 was applied
+        assert applied_v2 == ["002_stale_terminal_state.sql"]
+
+        # Step 6: Verify schema_migrations contains 1 and 2, and new index excludes 'stale'
+        with psycopg.connect(tmp_db_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT version, checksum FROM control.schema_migrations ORDER BY version"
+                )
+                rows = cur.fetchall()
+                assert len(rows) == 2
+                assert rows[0][0] == 1
+                assert rows[0][1] == canonical_v1_checksum
+                assert rows[1][0] == 2
+
+                # Verify two 'stale' incidents can now coexist
+                inc_stale1 = str(uuid.uuid4())
+                inc_stale2 = str(uuid.uuid4())
+                cur.execute(
+                    """
+                    INSERT INTO control.incidents (id, state, symptom, request_id)
+                    VALUES (%s, 'stale', 'Stale 1 under v2', %s)
+                    """,
+                    (inc_stale1, str(uuid.uuid4())),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO control.incidents (id, state, symptom, request_id)
+                    VALUES (%s, 'stale', 'Stale 2 under v2', %s)
+                    """,
+                    (inc_stale2, str(uuid.uuid4())),
+                )
+
+                # Verify two 'investigating' incidents still cannot coexist
+                inc_act1 = str(uuid.uuid4())
+                inc_act2 = str(uuid.uuid4())
+                cur.execute(
+                    """
+                    INSERT INTO control.incidents (id, state, symptom, request_id)
+                    VALUES (%s, 'investigating', 'Active 1 under v2', %s)
+                    """,
+                    (inc_act1, str(uuid.uuid4())),
+                )
+                with pytest.raises(psycopg.errors.UniqueViolation):
+                    with conn.transaction():
+                        cur.execute(
+                            """
+                            INSERT INTO control.incidents (id, state, symptom, request_id)
+                            VALUES (%s, 'investigating', 'Active 2 under v2', %s)
+                            """,
+                            (inc_act2, str(uuid.uuid4())),
+                        )
+            conn.rollback()
+    finally:
+        migration_url = live_settings.il_migration_database_url
+        with psycopg.connect(migration_url, autocommit=True) as admin_conn:
+            with admin_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = %s AND pid <> pg_backend_pid()
+                    """,
+                    (tmp_db_name,),
+                )
+                cur.execute(f'DROP DATABASE IF EXISTS "{tmp_db_name}"')
+
+
