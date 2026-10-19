@@ -955,21 +955,28 @@ async def test_evaluation_runner_recipe_execution(live_settings, monkeypatch):
             failing_rows = cur.fetchall()
             assert len(failing_rows) >= 1, "Expected failing request logs for primary failure"
 
-            # 5. Chronological evidence: older misleading logs are strictly older than failure
+            # 5. Explicitly verify exactly 2 post-fault checkout attempts occurred (CLEANUP-02)
+            cur.execute("SELECT COUNT(*) FROM sandbox.logs WHERE event_kind = 'inventory_failed'")
+            post_fault_attempts = cur.fetchone()[0]
+            assert post_fault_attempts == 2, (
+                f"Expected exactly 2 post-fault checkout attempts, got {post_fault_attempts}"
+            )
+
+            # 6. Chronological evidence: older misleading logs are strictly older than failure
             older_ts = misleading_rows[0][1]
             failure_ts = failing_rows[0][1]
             assert older_ts < failure_ts, (
                 f"Expected older misleading log ({older_ts}) < failure ({failure_ts})"
             )
 
-            # 6. Verify diagnostics logs prioritize failing request and include noise/older
+            # 7. Verify diagnostics logs prioritize failing request and include noise/older
             target_uuid = UUID(artifact.failed_request_id)
             diag_logs = get_diagnostics_logs(conn, request_id=target_uuid, limit=40)
             diag_kinds = [entry.event_kind for entry in diag_logs]
             assert "inventory_failed" in diag_kinds or "dependency_alert" in diag_kinds
             assert "background_noise" in diag_kinds
 
-            # 7. Check applied initial conditions in target state
+            # 8. Check applied initial conditions in target state
             cur.execute(
                 """
                 SELECT endpoint_key, worker_running, maintenance
@@ -982,12 +989,12 @@ async def test_evaluation_runner_recipe_execution(live_settings, monkeypatch):
             assert tgt_row[1] is True
             assert tgt_row[2] is False
 
-            # 8. Check target_state_before captured after setup
+            # 9. Check target_state_before captured after setup
             assert artifact.target_state_before.get("endpoint_key") == "inventory-legacy"
             assert artifact.target_state_before.get("worker_running") is True
             assert artifact.target_state_before.get("target_revision") is not None
 
-            # 9. Ensure no gold answers / fault-family answers leak into log messages
+            # 10. Ensure no gold answers / fault-family answers leak into log messages
             for entry in diag_logs:
                 assert "test-runner-recipe-01" not in entry.message
                 assert "gold" not in entry.message.lower()
@@ -995,12 +1002,39 @@ async def test_evaluation_runner_recipe_execution(live_settings, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_initial_conditions_semantics_across_all_fault_families(live_settings):
-    """Verify initial_conditions and fault injection semantics across fault families (FINAL-05)."""
-    import httpx
-
+async def test_initial_conditions_semantics_across_all_fault_families(live_settings, monkeypatch):
+    """Verify initial conditions and fault injection semantics via real runner path (CLEANUP-03)."""
+    import evals.run
+    from evals.run import CaseRecipe, run_case
     from incidentlab.db import get_sandbox_connection
     from incidentlab.sandbox.service import get_target_state
+
+    # Stub the investigation call so runner setup executes the real path without calling live LLM
+    async def fake_investigation(incident_id, settings=None, evidence_filter=None):
+        return {
+            "incident_id": str(incident_id),
+            "diagnosis": {
+                "symptom": "Stubbed symptom for initial conditions test",
+                "decision": "escalate",
+                "confidence": 0.9,
+                "justification": "Stubbed investigation for semantics test",
+                "evidence_ids": [],
+                "runbook_citations": [],
+                "uncertainty": "",
+            },
+            "proposal": None,
+            "recent_results": [],
+            "retrieved_runbooks": [],
+            "model_turn_count": 1,
+            "read_tool_calls_count": 0,
+            "total_prompt_tokens": 100,
+            "total_completion_tokens": 50,
+            "turn_durations": [0.1],
+            "state_before": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr(evals.run, "run_investigation", fake_investigation)
 
     families = [
         (
@@ -1020,52 +1054,37 @@ async def test_initial_conditions_semantics_across_all_fault_families(live_setti
         ),
     ]
 
-    admin_headers = {"Authorization": f"Bearer {live_settings.il_sandbox_admin_token}"}
+    for family, initial_conds, expected_state in families:
+        case = CaseRecipe(
+            case_id=f"test-init-cond-{family}",
+            split="dev",
+            family=family,
+            variation="clean",
+            seed=42,
+            initial_conditions=initial_conds,
+            traffic_recipe={"pre_fault_checkouts": 0, "post_fault_checkouts": 1, "noise_logs": 0},
+            evidence_filter=None,
+            state_change=None,
+            symptom_template=f"Checkout failed under {family}",
+        )
 
-    async with httpx.AsyncClient(timeout=10.0) as ac:
-        for family, initial_conds, expected_state in families:
-            # 1. Reset sandbox to healthy baseline
-            r_reset = await ac.post(
-                f"{live_settings.il_sandbox_base_url}/operator/reset",
-                headers=admin_headers,
+        artifact = await run_case(case, approach="agent", settings=live_settings)
+
+        # 1. Verify target state accurately represents the intended fault and initial conditions
+        # as set up by the real runner setup path
+        with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+            state = get_target_state(s_conn)
+            assert state["endpoint_key"] == expected_state["endpoint_key"], (
+                f"Family {family}: endpoint_key mismatch"
             )
-            assert r_reset.status_code == 200
-
-            # 2. Inject fault
-            r_inj = await ac.post(
-                f"{live_settings.il_sandbox_base_url}/operator/inject",
-                headers=admin_headers,
-                json={"family": family, "variant_seed": 42},
+            assert state["worker_running"] == expected_state["worker_running"], (
+                f"Family {family}: worker_running mismatch"
             )
-            assert r_inj.status_code == 200
+            assert state["maintenance"] == expected_state["maintenance"], (
+                f"Family {family}: maintenance mismatch"
+            )
 
-            # 3. Reconcile case.initial_conditions (as done in evals/run.py)
-            with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
-                with s_conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE sandbox.target_state
-                        SET endpoint_key = COALESCE(%s, endpoint_key),
-                            worker_running = COALESCE(%s, worker_running),
-                            maintenance = COALESCE(%s, maintenance)
-                        WHERE id = 1
-                        """,
-                        (
-                            initial_conds.get("endpoint_key"),
-                            initial_conds.get("worker_running"),
-                            initial_conds.get("maintenance"),
-                        ),
-                    )
-                s_conn.commit()
-
-                # 4. Verify target state accurately represents the intended fault and conditions
-                state = get_target_state(s_conn)
-                assert state["endpoint_key"] == expected_state["endpoint_key"], (
-                    f"Family {family}: endpoint_key mismatch"
-                )
-                assert state["worker_running"] == expected_state["worker_running"], (
-                    f"Family {family}: worker_running mismatch"
-                )
-                assert state["maintenance"] == expected_state["maintenance"], (
-                    f"Family {family}: maintenance mismatch"
-                )
+        # 2. Also verify runner-captured target_state_before matches
+        assert artifact.target_state_before.get("endpoint_key") == expected_state["endpoint_key"]
+        tgt_worker = artifact.target_state_before.get("worker_running")
+        assert tgt_worker == expected_state["worker_running"]

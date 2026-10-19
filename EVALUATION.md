@@ -1,6 +1,6 @@
 # IncidentLab evaluation contract
 
-Status: protocol only, 2026-10-13. No scores, performance measurements, qualifications, passing tests, or completed demonstrations are claimed. `artifacts/` is the future ignored output location. Requirements covered: IL-01 through IL-14, with outcome gates IL-08, IL-09, IL-11, IL-12, and IL-13.
+Status: evaluation protocol implemented and exercised. The latest recorded held-out agent result remains 10/18, below the required 15/18. Software/evaluator remediation is verified, but IL-12 and P6 remain open. Requirements covered: IL-01 through IL-14, with outcome gates IL-08, IL-09, IL-11, IL-12, and IL-13.
 
 ## What success means
 
