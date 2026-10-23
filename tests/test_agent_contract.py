@@ -533,13 +533,29 @@ async def test_untrusted_evidence_offline_fake_cannot_execute_without_bound_appr
         "uncertainty": "",
     }
 
+    call_step = 0
+
     async def fake_call_model(*args, **kwargs) -> ModelResult:
+        nonlocal call_step
+        call_step += 1
+        if call_step == 1:
+            from incidentlab.model import ValidatedToolCall
+
+            return ModelResult(
+                tool_calls=[ValidatedToolCall(name="get_config", args={})],
+                diagnosis=None,
+                input_tokens=100,
+                output_tokens=20,
+                duration_ms=10,
+            )
+
         with get_control_connection(live_settings) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT evidence_id FROM control.evidence
-                    WHERE incident_id = %s AND kind != 'runbook'
+                    WHERE incident_id = %s AND kind = 'config'
+                    ORDER BY observed_at DESC
                     LIMIT 1
                     """,
                     (incident_id,),
@@ -616,4 +632,158 @@ async def test_untrusted_evidence_offline_fake_cannot_execute_without_bound_appr
                     (incident_id,),
                 )
             conn.commit()
+
+
+@pytest.mark.integration
+async def test_semantic_repair_preconditions_enforced(live_settings, monkeypatch):
+    """Verify semantic configuration preconditions are deterministically enforced before proposal.
+
+    Tests A-D:
+    - Test A: inventory-legacy -> set_inventory_endpoint allowed
+    - Test B: inventory-local -> set_inventory_endpoint rejected / fails closed, zero mutation
+    - Test C: worker_running=false -> resume_order_worker allowed
+    - Test D: worker_running=true -> resume_order_worker rejected / fails closed, zero mutation
+    """
+    from incidentlab.db import get_control_connection, get_sandbox_connection
+    from incidentlab.graph import run_investigation
+    from incidentlab.model import ModelResult, ValidatedToolCall
+    from incidentlab.sandbox import service as sandbox_service
+
+    test_matrix = [
+        # (family, action, repair_kwargs, expected_phase, test_id)
+        (
+            "inventory_config",
+            "set_inventory_endpoint",
+            {"endpoint_key": "inventory-local"},
+            "awaiting_approval",
+            "Test A",
+        ),
+        (
+            "worker_paused",
+            "set_inventory_endpoint",
+            {"endpoint_key": "inventory-local"},
+            "failed",
+            "Test B",
+        ),
+        (
+            "worker_paused",
+            "resume_order_worker",
+            {"worker_id": "checkout-worker"},
+            "awaiting_approval",
+            "Test C",
+        ),
+        (
+            "inventory_config",
+            "resume_order_worker",
+            {"worker_id": "checkout-worker"},
+            "failed",
+            "Test D",
+        ),
+    ]
+
+    for family, action, repair_kwargs, expected_phase, test_id in test_matrix:
+        # Seed sandbox
+        with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+            sandbox_service.reset_sandbox(s_conn)
+            rev_before = sandbox_service.inject_fault(s_conn, family=family, variant_seed=1)
+
+        incident_id = uuid4()
+        with get_control_connection(live_settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'closed_unknown'
+                    WHERE state NOT IN (
+                        'verified_recovered', 'verification_failed', 'escalated',
+                        'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO control.incidents (id, state, symptom, request_id)
+                    VALUES (%s, 'investigating', 'Test semantic precondition incident', %s)
+                    """,
+                    (incident_id, uuid4()),
+                )
+            conn.commit()
+
+        call_step = 0
+
+        async def fake_model_runner(*args, **kwargs) -> ModelResult:
+            nonlocal call_step
+            call_step += 1
+            if call_step == 1:
+                return ModelResult(
+                    tool_calls=[ValidatedToolCall(name="get_config", args={})],
+                    diagnosis=None,
+                    input_tokens=50,
+                    output_tokens=10,
+                    duration_ms=5,
+                )
+
+            with get_control_connection(live_settings) as c_conn:
+                with c_conn.cursor() as c_cur:
+                    c_cur.execute(
+                        """
+                        SELECT evidence_id FROM control.evidence
+                        WHERE incident_id = %s AND kind = 'config'
+                        ORDER BY observed_at DESC
+                        LIMIT 1
+                        """,
+                        (incident_id,),
+                    )
+                    cfg_row = c_cur.fetchone()
+                    cfg_eid = cfg_row[0] if cfg_row else "ev_mock_config"
+
+                    c_cur.execute(
+                        """
+                        SELECT source, source_version, section_id FROM control.evidence
+                        WHERE incident_id = %s AND kind = 'runbook'
+                        LIMIT 1
+                        """,
+                        (incident_id,),
+                    )
+                    rb = c_cur.fetchone()
+
+            diag = {
+                "summary": f"Testing precondition for {action}",
+                "confidence": "high",
+                "evidence_ids": [cfg_eid],
+                "runbook_citations": [
+                    {
+                        "runbook_id": rb[0] if rb else "inventory",
+                        "source_version": rb[1] if rb else "1",
+                        "section_id": rb[2] if rb else "repair",
+                    }
+                ],
+                "decision": "propose_repair",
+                "repair": {"action": action, **repair_kwargs},
+                "uncertainty": "",
+            }
+            return ModelResult(
+                tool_calls=[],
+                diagnosis=diag,
+                input_tokens=100,
+                output_tokens=50,
+                duration_ms=10,
+            )
+
+        monkeypatch.setattr("incidentlab.graph.call_model", fake_model_runner)
+
+        res_state = await run_investigation(incident_id, settings=live_settings)
+        assert res_state["phase"] == expected_phase, (
+            f"{test_id} failed: expected {expected_phase}, got {res_state['phase']} "
+            f"(error: {res_state.get('error')})"
+        )
+
+        if expected_phase == "awaiting_approval":
+            assert res_state.get("proposal") is not None
+            assert res_state["proposal"]["payload"]["action"] == action
+        else:
+            assert res_state.get("proposal") is None
+            # Zero mutation on failure
+            with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+                assert sandbox_service.get_target_state(s_conn)["revision"] == rev_before
 

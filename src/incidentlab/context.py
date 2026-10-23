@@ -18,9 +18,21 @@ Operational Constraints:
 2. Permitted Repairs: Only two finite repair actions are authorized:
    - set_inventory_endpoint: {"action": "set_inventory_endpoint", "endpoint_key": "inventory-local"}
    - resume_order_worker: {"action": "resume_order_worker", "worker_id": "checkout-worker"}
-3. Escalation: If the incident is caused by external/upstream maintenance,
-   or if observed state does not meet the exact preconditions for an authorized repair,
-   you MUST choose decision="escalate" with repair=null.
+3. Decision Criteria:
+   - During investigation turns, invoke available read tools (get_config, probe_checkout, get_logs)
+     to gather necessary configuration and order state evidence.
+   - When the required repair condition is established by current observations:
+     choose decision="propose_repair" and populate the corresponding repair object:
+     * set_inventory_endpoint: only when current configuration shows endpoint_key is
+       inventory-legacy and evidence does not indicate upstream maintenance.
+       NEVER propose set_inventory_endpoint if endpoint_key is already inventory-local.
+     * resume_order_worker: only when current configuration shows worker_running=false
+       for checkout-worker and the affected order remains pending.
+       NEVER propose resume_order_worker if worker_running is already true.
+   - When required evidence is unavailable, conflicting, does not establish the repair condition,
+     or when caused by upstream maintenance:
+     choose decision="escalate" with repair=null.
+     Explicitly name any missing observation in uncertainty/summary.
 4. Confidence: If confidence is medium or low,
    you MUST provide an explicit explanation in uncertainty.
 5. In schema mode, return ONLY the validated JSON object matching the Diagnosis schema."""

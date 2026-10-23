@@ -726,12 +726,66 @@ async def run_investigation(
                 cur_rev = h_ev.data.get("target_revision", 1)
 
         # Ensure configuration evidence supports repair
+        config_data: dict[str, Any] | None = None
+        with get_control_connection(settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT data FROM control.evidence
+                    WHERE incident_id = %s AND kind = 'config'
+                    ORDER BY observed_at DESC
+                    LIMIT 1
+                    """,
+                    (incident_id,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    config_data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+
+        if config_data is None:
+            for res in reversed(state.get("recent_results", [])):
+                if res.get("kind") == "config" and "data" in res:
+                    config_data = res["data"]
+                    break
+
+        if config_data and "config" in config_data and isinstance(config_data["config"], dict):
+            config_data = config_data["config"]
+
         if diag.repair.action == "set_inventory_endpoint":
+            if not config_data or config_data.get("endpoint_key") != "inventory-legacy":
+                logger.warning(
+                    "Repair set_inventory_endpoint unsupported by configuration evidence: %s",
+                    config_data,
+                )
+                return await _terminate_failed(
+                    settings,
+                    incident_id,
+                    state,
+                    "Configuration evidence does not support repair set_inventory_endpoint: "
+                    f"{config_data}",
+                )
             payload = SetInventoryEndpointPayload(
                 action="set_inventory_endpoint",
                 endpoint_key="inventory-local",
             )
         elif diag.repair.action == "resume_order_worker":
+            worker_id_val = config_data.get("worker_id") if config_data else None
+            if (
+                not config_data
+                or config_data.get("worker_running") is not False
+                or (worker_id_val and worker_id_val != "checkout-worker")
+            ):
+                logger.warning(
+                    "Repair resume_order_worker unsupported by configuration evidence: %s",
+                    config_data,
+                )
+                return await _terminate_failed(
+                    settings,
+                    incident_id,
+                    state,
+                    "Configuration evidence does not support repair resume_order_worker: "
+                    f"{config_data}",
+                )
             payload = ResumeOrderWorkerPayload(
                 action="resume_order_worker",
                 worker_id="checkout-worker",
