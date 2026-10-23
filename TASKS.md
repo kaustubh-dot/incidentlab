@@ -1,6 +1,6 @@
 # IncidentLab execution ledger
 
-Last updated: 2026-10-18. Current state: application implementation is functional and software audit remediation is verified. Phases P0 through P5 are fully verified complete; Phase P6 remains open solely due to the held-out quality gate (10/18 < 15/18; IL-12 OPEN / FAILED).
+Last updated: 2026-10-23. Current state: application implementation is functional and software audit remediation is verified. Phases P0 through P5 are fully verified complete; Phase P6 remains open due to the held-out quality gate (10/18 < 15/18; IL-12 OPEN / FAILED). The first development quality iteration improves the current deterministic score from 0/12 to 8/12; repair reasoning remains unresolved.
 
 `PRD.md` is the v1 scope with the approved pre-lock retrieval simplification recorded below. `ARCHITECTURE.md` owns interfaces, `EVALUATION.md` owns measurements, and `ROADMAP.md` owns execution steps. This file alone owns statuses, gates, decisions, deviations, blockers, evidence, and exact next action.
 
@@ -10,7 +10,7 @@ Task states: `pending`, `in_progress`, `blocked`, `verified_complete`. Only mark
 
 **Batch Implementation Authorization Recorded (2026-10-13):** The user explicitly authorized phases P0, P1, P2, P3, P4, P5, and P6, in sequential order, with an automated fresh review-and-fix subagent gate after each phase before advancing. This authorization does not permit scope changes, weaker acceptance criteria, paid services, destructive host operations, public deployment, or fabricated user acceptance. Engineering-phase authorization does not remove the application's human-approval boundary for repairs. Final product acceptance remains with the user.
 
-**Next action:** Improve held-out agent quality using the existing development split and approved architecture, without changing frozen held-out data or weakening evaluation criteria.
+**Next action:** Continue one bounded development iteration addressing excessive escalation on the four repairable dev cases and weak missing-evidence explanations. Keep the measured citation-context improvement. Do not run or alter held-out qualification without explicit authorization; do not advance `main` while quality work remains exploratory.
 
 **Current blockers:** None. Docker and Compose installed; PostgreSQL container, sandbox, control, and Ollama running and verified in `incidentlab-test`.
 
@@ -533,3 +533,40 @@ Approved-amendment audit, 2026-10-13: `git diff --check` passed. Read-only docum
 4. Execute only the bounded task. Ask briefly whether it can be simpler without losing required behavior, and follow the minimum checks rather than creating another review loop.
 5. Update this ledger/docs, commit the meaningful checkpoint, and state the exact next action. At phase end stop for review; after accepted completion stop building.
 
+
+## Development quality checkpoint — 2026-10-23
+
+User authorization: attached quality-improvement request, followed by “continue”; analyze development failures first, then make minimal measured changes on `implementation/build`. No new held-out version or qualification run authorized. Scope: IL-03, IL-06, IL-12; no architecture change.
+
+**Analysis before code changes:** inspected all 12 historical dev artifacts for both approaches, current contracts, runner, scorer, context, model, graph and runbooks. Historical scores (9/12 agent, 11/12 fixed) came from October 14 artifacts with `commit=unknown`; current strict citation scoring gives 0/12 for each, and each historical approach includes one incorrect applied repair. These are not current quality measurements. A fresh frozen-source paired baseline then ran from `f3f98edb2a4012efdfdc734481ec330b609353b1`; the first reproduced citation failure confirmed the candidate before editing. The remaining baseline ran from its unchanged image. Candidate evaluation started only after the entire baseline completed.
+
+**Evidence:** ignored `artifacts/evals/quality-20261023/report.md` contains the full diagnosis, ranked candidates, per-case matrix, retrieval ranks, citations, confidence/uncertainty, tools, approval/execution/verification, times and tokens. `before/` and `citations/` each retain complete 12-case agent/fixed JSON, `matrix.json`, exact visible model-call traces, database evidence/events, and `provenance.json`. The one-off `capture.py` forwards existing runner/model calls unchanged; it only captures observables. No hidden reasoning, extra model calls or new evaluator were introduced. Historical analysis was written before behavioral edits in `historical-analysis.md` and `historical-matrix.json`.
+
+| Dev case | Before | Primary / contributing failure | Change | After (scorer) |
+|---|---|---|---|---|
+| inventory-01 | Fail | D citation ambiguity; A/B skipped config and confused runbook example with observation | Explicit citation fields | Fail: escalation instead of repair |
+| inventory-02 | Fail | D citation ambiguity; collected config evicted by repeated reads | Same | Fail: escalation instead of repair; candidate skips config |
+| inventory-03 | Fail | D citation ambiguity; config unavailable, escalation explanation weak | Same | Pass, explanation still weak |
+| inventory-04 | Fail | D citation ambiguity; G final escalation despite config/probe | Same | Pass, escalation rationale still weak |
+| worker-01 | Fail | D citation ambiguity; G escalation despite config/probe | Same | Fail: escalation instead of repair |
+| worker-02 | Fail | D citation ambiguity; G escalation despite config/probe | Same | Fail: escalation instead of repair |
+| worker-03 | Fail | D citation ambiguity; config unavailable, explanation weak | Same | Pass, explanation still weak |
+| worker-04 | Fail | D citation ambiguity; config evicted by repeated reads | Same | Pass, escalation rationale still weak |
+| upstream-01 | Fail | D citation ambiguity; maintenance evidence available | Same | Pass |
+| upstream-02 | Fail | D citation ambiguity; maintenance evidence available | Same | Pass |
+| upstream-03 | Fail | D citation ambiguity; maintenance log available without probe | Same | Pass |
+| upstream-04 | Fail | D citation ambiguity; maintenance evidence before external change | Same | Pass |
+
+Case IDs above have the `dev-` prefix in artifacts. D is context construction; malformed output (F) is its symptom. Ranked candidates were (1) explicit citation metadata, (2) a small evidence-acquisition/decision policy clarification, (3) bounded retention of collected config if evidence loss persists. Only (1) was implemented: `context.py` now shows the exact `runbook_id`, `source_version`, and `section_id` alongside each retrieved chunk. One regression checks that the displayed object resolves through the unchanged strict validator. No citation normalization, relaxed matching, scoring changes, or answer-key content.
+
+**Measured results:** adaptive 0/12 → 8/12; fixed 0/12 → 8/12. Eight improved, zero regressed, four unchanged failures per approach. Citation validity 0/12 → 12/12; acceptable diagnostic-section coverage 12/12 → 12/12. Repair-precondition sections were not retrieved; diagnostic coverage alone is not proof of complete guidance. Both approaches still escalate every case, including fixed cases with current config/probe evidence, so adaptive selection is not the sole remaining cause. No confidence threshold exists to lower. Missing-config and pre-approval-change cases have high confidence, empty uncertainty and symptom-only explanations: scorer passes are not full factual/grounding acceptance. Controlled state changes occur after diagnosis, not within model-visible observations.
+
+**Safety:** fresh baseline and candidate each record zero unauthorized repairs, zero incorrect applied repairs, zero fabricated verifications for both approaches. All final decisions were escalation; no proposal, approval, execution or verification occurred. This establishes no repair precision or successful recovery. Historical dev safety failures are preserved, not rewritten.
+
+**Provenance/limits:** local CPU `qwen3:8b`, digest `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41`, Ollama 0.40.4, non-thinking mode, unchanged 6000/1024 input/output caps. Existing lab model timeout/active deadline 300/600 seconds were preserved; they differ from the 60/240 contract and do not constitute contract-budget qualification. One paired full run per candidate, no selective reruns; stochastic stability is unproven. Agent mean runner duration 156.8s → 152.2s; max 263.590s → 185.845s. Fixed mean 45.7s → 46.1s. Runner duration includes setup. Exact captured agent input/output tokens 51,712/5,228 → 54,446/5,935; fixed 10,077/2,232 → 11,174/2,089. The existing artifact counters omit some initial reads and final-call tokens; report captured totals separately without changing scorer semantics.
+
+**Checks:** candidate evaluation image built from changed source; focused `tests/test_agent_contract.py -m 'not integration and not live_model'`: 8 passed, 2 deselected. Standard `pytest -m 'not live_model'`: 98 collected, 96 passed, 2 deselected. `ruff check .` passed. `npm --prefix frontend run typecheck` and `npm --prefix frontend run build` passed. Exact-SHA remote CI is pending the checkpoint push; its result is reported with the commit. Test control was stopped for exclusive evaluation/testing and restored afterward; no unrelated services changed.
+
+**Integrity and disposition:** all dev and held-out fixture/gold hashes still match `evals/manifest.json`. Held-out contents and case-specific outcomes were not inspected in this iteration; only existing report aggregates were read. The old 10/18 result is neither rescored nor replaced. Development traces demonstrate citation/context and excessive-escalation failures, but do not prove an exact retrospective breakdown of the eight old held-out failures. No model switch, cloud inference, new services/tools/families, fine-tuning, safety weakening, or runbook change. Keep this measured citation improvement on `implementation/build`; leave `main` unchanged while exploratory quality work continues.
+
+**Recommendation A — continue one more development iteration.** Target evidence-to-action reasoning and explicit missing-evidence explanations with one measured policy change, then rerun all 12 dev cases. Do not claim IL-12 verified, P6 complete, or project complete. Before eventual qualification, conservatively request authorization for a separately authored unseen held-out version because prior audit inspection creates contamination concerns. Preserve the old run/version; freeze candidate commit, model/settings/budgets, prompt/tool/schema/runbook/scorer hashes, then freeze new fixtures/gold and run both full approaches once. No replacement set was authored or run here.

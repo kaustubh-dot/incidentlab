@@ -233,7 +233,17 @@ docker compose exec -T control python -m evals.score --compare \
   --output artifacts/evals/heldout_report.json
 ```
 
-### Paired Outcome Summary
+### Development quality iteration (2026-10-23)
+
+A fresh paired development run at `f3f98ed` scored **0/12** for both approaches under the current strict citation checks. The model copied composite runbook chunk IDs into fields that require separate source/version/section values. Showing those exact citation fields in context improved both the adaptive agent and fixed baseline to **8/12**, with citation validity improving from 0/12 to 12/12. Eight cases improved, none regressed, and four repairable cases still escalated. Retrieval included an acceptable diagnostic section in all cases; no retrieval technology changed.
+
+Both fresh runs recorded zero unauthorized repairs, incorrect applied repairs, and fabricated verifications. All final decisions were escalations, so these runs establish no successful recovery or repair precision. Missing-evidence explanations remain weak despite deterministic scorer passes. The unchanged lab settings were a 300-second model timeout and 600-second active deadline, rather than the contract's 60/240; these results are development evidence, not qualification. The next step is one bounded development iteration on evidence-to-action reasoning. IL-12 and P6 remain open; held-out data was neither changed nor rerun.
+
+The full local matrices, model-visible traces, model digest/settings and source hashes are retained in ignored `artifacts/evals/quality-20261023/`; [TASKS.md](TASKS.md#development-quality-checkpoint--2026-10-23) records the durable findings and checks.
+
+### Historical Paired Outcome Summary
+
+The following are the originally recorded results, not scores for the current code. The October 14 development artifacts have unknown commit provenance and both rescore to 0/12 under current exact citation validation. Their incorrect-repair counts remain historical failures. The old held-out 10/18 result remains the recorded failed qualification; no new held-out claim is made.
 
 | Metric | Dev Fixed | Dev Agent | Heldout Fixed | Heldout Agent |
 |---|---|---|---|---|

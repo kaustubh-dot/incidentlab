@@ -43,7 +43,15 @@ def build_context(
     for chunk in runbook_chunks:
         cid = chunk.get("chunk_id", "unknown")
         body = chunk.get("content", "")
-        rb_lines.append(f"--- Runbook Section [{cid}] ---\n{body}")
+        citation = {
+            "runbook_id": chunk.get("source"),
+            "source_version": chunk.get("source_version"),
+            "section_id": chunk.get("section_id"),
+        }
+        rb_lines.append(
+            f"--- Runbook Section [{cid}] ---\n"
+            f"Citation fields (copy exactly): {json.dumps(citation)}\n{body}"
+        )
     runbooks_text = "\n\n".join(rb_lines) if rb_lines else "None retrieved."
 
     # Validate and format case notes

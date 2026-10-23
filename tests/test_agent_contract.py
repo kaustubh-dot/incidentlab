@@ -286,6 +286,29 @@ def test_context_keeps_required_evidence_within_budget():
     assert "ev:fixture:1" in json.dumps(messages)
 
 
+def test_context_exposes_citation_fields_accepted_by_strict_validator():
+    """The displayed citation must resolve without guessing from a composite chunk ID."""
+    import json
+
+    from incidentlab.graph import validate_runbook_citations
+
+    chunks = [{
+        "chunk_id": "inventory:1:diagnostics",
+        "source": "inventory",
+        "source_version": "1",
+        "section_id": "diagnostics",
+        "content": "Inspect current configuration.",
+    }]
+    messages = build_context({"retrieved_runbooks": chunks})
+    line = next(
+        line for line in messages[1]["content"].splitlines()
+        if line.startswith("Citation fields (copy exactly): ")
+    )
+    citation = json.loads(line.split(": ", 1)[1])
+    assert validate_runbook_citations([citation], chunks) == []
+    assert citation["runbook_id"] == "inventory"
+
+
 @pytest.mark.integration
 @pytest.mark.live_model
 async def test_live_investigation_inventory_fault(live_settings):
