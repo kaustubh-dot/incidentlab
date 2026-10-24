@@ -288,6 +288,103 @@ def validate_runbook_citations(
     return unretrieved
 
 
+def validate_repair_precondition(
+    repair: RepairPayload | dict[str, Any] | str,
+    observed_evidence: dict[str, Any] | None,
+) -> str | None:
+    """Validate that observed configuration evidence supports the proposed repair action.
+
+    Deterministic preconditions:
+    - set_inventory_endpoint: requires observed endpoint_key == 'inventory-legacy'
+    - resume_order_worker: requires observed worker_running is False and
+      worker_id in (None, 'checkout-worker')
+
+    Returns an error message string if evidence is missing, masked, contradictory,
+    or unsupported; returns None if the repair is supported.
+    """
+    if isinstance(repair, str):
+        action = repair
+    elif hasattr(repair, "action"):
+        action = getattr(repair, "action")
+    elif isinstance(repair, dict):
+        action = repair.get("action")
+    else:
+        action = str(repair)
+
+    config_data = observed_evidence
+    if config_data and "config" in config_data and isinstance(config_data["config"], dict):
+        config_data = config_data["config"]
+    if config_data and "data" in config_data and isinstance(config_data["data"], dict):
+        config_data = config_data["data"]
+        if "config" in config_data and isinstance(config_data["config"], dict):
+            config_data = config_data["config"]
+
+    if not config_data or not isinstance(config_data, dict):
+        return f"Configuration evidence is missing or invalid for repair {action}: {config_data}"
+
+    if action == "set_inventory_endpoint":
+        endpoint_key = config_data.get("endpoint_key")
+        if endpoint_key != "inventory-legacy":
+            return (
+                f"Configuration evidence does not support repair set_inventory_endpoint: "
+                f"endpoint_key is '{endpoint_key}', expected 'inventory-legacy'"
+            )
+        return None
+    elif action == "resume_order_worker":
+        worker_running = config_data.get("worker_running")
+        worker_id = config_data.get("worker_id")
+        if worker_running is not False:
+            return (
+                f"Configuration evidence does not support repair resume_order_worker: "
+                f"worker_running is {worker_running}, expected False"
+            )
+        if worker_id is not None and worker_id != "checkout-worker":
+            return (
+                f"Configuration evidence does not support repair resume_order_worker: "
+                f"worker_id is '{worker_id}', expected 'checkout-worker'"
+            )
+        return None
+    else:
+        return f"Unsupported repair: {repair}"
+
+
+def get_observed_config(
+    incident_id: UUID,
+    settings: Settings,
+    state: AgentState | dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Retrieve the most recent observed configuration evidence from control DB or state."""
+    config_data: dict[str, Any] | None = None
+    try:
+        with get_control_connection(settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT data FROM control.evidence
+                    WHERE incident_id = %s AND kind = 'config'
+                    ORDER BY observed_at DESC
+                    LIMIT 1
+                    """,
+                    (incident_id,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    config_data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    except Exception:
+        pass
+
+    if config_data is None and state:
+        for res in reversed(state.get("recent_results", [])):
+            if res.get("kind") == "config" and "data" in res:
+                config_data = res["data"]
+                break
+
+    if config_data and "config" in config_data and isinstance(config_data["config"], dict):
+        config_data = config_data["config"]
+
+    return config_data
+
+
 async def run_investigation(
     incident_id: UUID,
     settings: Settings | None = None,
@@ -726,66 +823,22 @@ async def run_investigation(
                 cur_rev = h_ev.data.get("target_revision", 1)
 
         # Ensure configuration evidence supports repair
-        config_data: dict[str, Any] | None = None
-        with get_control_connection(settings) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT data FROM control.evidence
-                    WHERE incident_id = %s AND kind = 'config'
-                    ORDER BY observed_at DESC
-                    LIMIT 1
-                    """,
-                    (incident_id,),
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    config_data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-
-        if config_data is None:
-            for res in reversed(state.get("recent_results", [])):
-                if res.get("kind") == "config" and "data" in res:
-                    config_data = res["data"]
-                    break
-
-        if config_data and "config" in config_data and isinstance(config_data["config"], dict):
-            config_data = config_data["config"]
+        config_data = get_observed_config(incident_id, settings, state)
+        val_err = validate_repair_precondition(diag.repair, config_data)
+        if val_err:
+            logger.warning(
+                "Repair %s unsupported by configuration evidence: %s",
+                diag.repair.action,
+                val_err,
+            )
+            return await _terminate_failed(settings, incident_id, state, val_err)
 
         if diag.repair.action == "set_inventory_endpoint":
-            if not config_data or config_data.get("endpoint_key") != "inventory-legacy":
-                logger.warning(
-                    "Repair set_inventory_endpoint unsupported by configuration evidence: %s",
-                    config_data,
-                )
-                return await _terminate_failed(
-                    settings,
-                    incident_id,
-                    state,
-                    "Configuration evidence does not support repair set_inventory_endpoint: "
-                    f"{config_data}",
-                )
             payload = SetInventoryEndpointPayload(
                 action="set_inventory_endpoint",
                 endpoint_key="inventory-local",
             )
         elif diag.repair.action == "resume_order_worker":
-            worker_id_val = config_data.get("worker_id") if config_data else None
-            if (
-                not config_data
-                or config_data.get("worker_running") is not False
-                or (worker_id_val and worker_id_val != "checkout-worker")
-            ):
-                logger.warning(
-                    "Repair resume_order_worker unsupported by configuration evidence: %s",
-                    config_data,
-                )
-                return await _terminate_failed(
-                    settings,
-                    incident_id,
-                    state,
-                    "Configuration evidence does not support repair resume_order_worker: "
-                    f"{config_data}",
-                )
             payload = ResumeOrderWorkerPayload(
                 action="resume_order_worker",
                 worker_id="checkout-worker",

@@ -787,3 +787,174 @@ async def test_semantic_repair_preconditions_enforced(live_settings, monkeypatch
             with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
                 assert sandbox_service.get_target_state(s_conn)["revision"] == rev_before
 
+
+def test_validate_repair_precondition_helper():
+    """Verify validate_repair_precondition directly evaluates actions and evidence."""
+    from incidentlab.graph import validate_repair_precondition
+
+    # set_inventory_endpoint
+    assert (
+        validate_repair_precondition(
+            "set_inventory_endpoint", {"endpoint_key": "inventory-legacy"}
+        )
+        is None
+    )
+    assert (
+        validate_repair_precondition(
+            "set_inventory_endpoint", {"endpoint_key": "inventory-local"}
+        )
+        is not None
+    )
+    assert validate_repair_precondition("set_inventory_endpoint", {}) is not None
+    assert validate_repair_precondition("set_inventory_endpoint", None) is not None
+
+    # resume_order_worker
+    assert (
+        validate_repair_precondition(
+            "resume_order_worker", {"worker_running": False, "worker_id": "checkout-worker"}
+        )
+        is None
+    )
+    assert validate_repair_precondition("resume_order_worker", {"worker_running": False}) is None
+    assert (
+        validate_repair_precondition(
+            "resume_order_worker", {"worker_running": True, "worker_id": "checkout-worker"}
+        )
+        is not None
+    )
+    assert (
+        validate_repair_precondition(
+            "resume_order_worker", {"worker_running": False, "worker_id": "other-worker"}
+        )
+        is not None
+    )
+    assert validate_repair_precondition("resume_order_worker", None) is not None
+
+    # unknown action
+    assert (
+        validate_repair_precondition(
+            "restart_server", {"endpoint_key": "inventory-legacy"}
+        )
+        is not None
+    )
+
+
+@pytest.mark.integration
+async def test_repair_precondition_parity_rejection(live_settings, monkeypatch):
+    """Verify both adaptive and fixed paths enforce identical unsupported-repair rejection."""
+    from evals.baseline import run_fixed_investigation
+    from incidentlab.db import get_control_connection, get_sandbox_connection
+    from incidentlab.graph import run_investigation
+    from incidentlab.model import ModelResult, ValidatedToolCall
+    from incidentlab.sandbox import service as sandbox_service
+
+    # Seed sandbox with healthy target (endpoint_key is inventory-local, worker_running is True)
+    with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+        sandbox_service.reset_sandbox(s_conn)
+        rev_before = sandbox_service.get_target_state(s_conn)["revision"]
+
+    for path_name, run_fn in [("adaptive", run_investigation), ("fixed", run_fixed_investigation)]:
+        incident_id = uuid4()
+        with get_control_connection(live_settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'closed_unknown'
+                    WHERE state NOT IN (
+                        'verified_recovered', 'verification_failed', 'escalated',
+                        'failed', 'rejected', 'expired', 'cancelled', 'closed_unknown'
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO control.incidents (id, state, symptom, request_id)
+                    VALUES (%s, 'investigating', 'Parity test incident', %s)
+                    """,
+                    (incident_id, uuid4()),
+                )
+            conn.commit()
+
+        call_step = 0
+
+        async def fake_model_runner(*args, **kwargs) -> ModelResult:
+            nonlocal call_step
+            call_step += 1
+            if path_name == "adaptive" and call_step == 1:
+                return ModelResult(
+                    tool_calls=[ValidatedToolCall(name="get_config", args={})],
+                    diagnosis=None,
+                    input_tokens=50,
+                    output_tokens=10,
+                    duration_ms=5,
+                )
+
+            with get_control_connection(live_settings) as c_conn:
+                with c_conn.cursor() as c_cur:
+                    c_cur.execute(
+                        """
+                        SELECT evidence_id FROM control.evidence
+                        WHERE incident_id = %s AND kind = 'config'
+                        ORDER BY observed_at DESC
+                        LIMIT 1
+                        """,
+                        (incident_id,),
+                    )
+                    cfg_row = c_cur.fetchone()
+                    cfg_eid = cfg_row[0] if cfg_row else "ev_mock_config"
+
+                    c_cur.execute(
+                        """
+                        SELECT source, source_version, section_id FROM control.evidence
+                        WHERE incident_id = %s AND kind = 'runbook'
+                        LIMIT 1
+                        """,
+                        (incident_id,),
+                    )
+                    rb = c_cur.fetchone()
+
+            diag = {
+                "summary": "Proposing set_inventory_endpoint despite healthy endpoint",
+                "confidence": "high",
+                "evidence_ids": [cfg_eid],
+                "runbook_citations": [
+                    {
+                        "runbook_id": rb[0] if rb else "inventory",
+                        "source_version": rb[1] if rb else "1",
+                        "section_id": rb[2] if rb else "repair",
+                    }
+                ],
+                "decision": "propose_repair",
+                "repair": {
+                    "action": "set_inventory_endpoint",
+                    "endpoint_key": "inventory-local",
+                },
+                "uncertainty": "",
+            }
+            return ModelResult(
+                tool_calls=[],
+                diagnosis=diag,
+                input_tokens=100,
+                output_tokens=50,
+                duration_ms=10,
+            )
+
+        if path_name == "adaptive":
+            monkeypatch.setattr("incidentlab.graph.call_model", fake_model_runner)
+        else:
+            monkeypatch.setattr("evals.baseline.call_model", fake_model_runner)
+
+        res_state = await run_fn(incident_id, settings=live_settings)
+        assert res_state["phase"] == "failed", (
+            f"{path_name} path failed: expected phase 'failed', got {res_state['phase']} "
+            f"(error: {res_state.get('error')})"
+        )
+        assert res_state.get("proposal") is None, (
+            f"{path_name} path created a proposal unexpectedly"
+        )
+
+        with get_sandbox_connection(live_settings.il_sandbox_database_url) as s_conn:
+            assert sandbox_service.get_target_state(s_conn)["revision"] == rev_before, (
+                f"{path_name} path mutated sandbox target revision"
+            )

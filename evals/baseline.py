@@ -25,6 +25,8 @@ from incidentlab.graph import (
     DIAGNOSIS_SCHEMA,
     AgentState,
     create_proposal,
+    get_observed_config,
+    validate_repair_precondition,
 )
 from incidentlab.mcp_client import McpSession
 from incidentlab.model import ModelResult, call_model
@@ -320,14 +322,41 @@ async def run_fixed_investigation(
     if not diag.repair:
         raise ValueError("propose_repair decision must include repair payload")
 
+    # Validate semantic repair preconditions against observed configuration evidence
+    config_data = get_observed_config(incident_id, settings, state)
+    val_err = validate_repair_precondition(diag.repair, config_data)
+    if val_err:
+        logger.warning(
+            "Fixed baseline repair %s unsupported by configuration evidence: %s",
+            diag.repair.action,
+            val_err,
+        )
+        state["phase"] = "failed"
+        state["error"] = val_err
+        with get_control_connection(settings) as conn:
+            with conn.cursor() as cur:
+                from psycopg.types.json import Jsonb
+
+                cur.execute(
+                    """
+                    UPDATE control.incidents
+                    SET state = 'failed',
+                        updated_at = NOW(),
+                        active_ms = active_ms + %s,
+                        outcome = %s
+                    WHERE id = %s
+                    """,
+                    (int((time.monotonic() - t0) * 1000), Jsonb({"error": val_err}), incident_id),
+                )
+            record_event(conn, incident_id, "incident_failed", {"error": val_err})
+            conn.commit()
+        return state
+
     action = diag.repair.action
     if action == "set_inventory_endpoint":
-        if not diag.repair.endpoint_key:
-            raise ValueError("set_inventory_endpoint requires endpoint_key")
-        payload = SetInventoryEndpointPayload(endpoint_key=diag.repair.endpoint_key)
+        payload = SetInventoryEndpointPayload(endpoint_key="inventory-local")
     elif action == "resume_order_worker":
-        worker_id = diag.repair.worker_id or "checkout-worker"
-        payload = ResumeOrderWorkerPayload(worker_id=worker_id)
+        payload = ResumeOrderWorkerPayload(worker_id="checkout-worker")
     else:
         raise ValueError(f"Unsupported repair action: {action}")
 
